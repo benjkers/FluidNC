@@ -169,39 +169,47 @@ namespace ATCs {
     }
 
     void Custom_ATC::drop_tool(uint8_t tool_index) {
+        move_to_safe_z();
+        _macro.addf("(MSG : Dropping of tool #%d)", tool_index);
         tool_index -= 1;
         float feed_point=0;
         float feed_height=0;
-         feed_point=_tool_mpos[tool_index][1]+_tool_holder[1]; // move z to above tool holder height
-         feed_height=_tool_mpos[tool_index][2]+_tool_holder[2]; // move z to above tool holder height
+        feed_point=_tool_mpos[tool_index][1]+_tool_holder[1]; // move z to above tool holder height
+        feed_height=_tool_mpos[tool_index][2]+_tool_holder[2]; // move z to above tool holder height
         _macro.addf("G53G0X%0.3fY%0.3f",_tool_mpos[tool_index][0],feed_point); // move to tool location xy with feed distance offset
         _macro.addf("G53G0Z%0.3f",_tool_mpos[tool_index][2]); // move to tool location z
-        _macro.addf("G53G1Z%0.3f F%0.3f",_tool_mpos[tool_index][1] ,_probe_seek_rate); // move tool into rack
-        _macro.addf("G62 P0"); // air on
-        _macro.addf("G4 P2"); // wait for air to unlock 
-        _macro.addf("G53G0Z%0.3f",_tool_mpos[tool_index][2]); // lift off tool holder
-        _macro.addf("G63 P0"); // air off
-        
+        _macro.addf("G53G0Y%0.3f",_tool_mpos[tool_index][1]); // move tool into rack
+        _macro.addf("M62 P0"); // air on
+        _macro.addf("G4 P0.5"); // wait for air to unlock 
+        _macro.addf("G53G0Z%0.3f",feed_height); // lift off tool holder
+        _macro.addf("M63 P0"); // air off
+        move_to_safe_z();
         
     }
 
     void Custom_ATC::pick_tool(uint8_t tool_index) {
+        move_to_safe_z();
+        _macro.addf("(MSG : Picking up tool #%d)", tool_index);
         tool_index -= 1;
         float feed_height=0;
-        _macro.addf("G53G0X%0.3fY%0.3f",_tool_mpos[tool_index][0],_tool_mpos[tool_index][1]); // move to tool location
+        float feed_point=0;
         feed_height=_tool_mpos[tool_index][2]+_tool_holder[2]; // move z to above tool holder height
+        feed_point=_tool_mpos[tool_index][1]+_tool_holder[1]; // move z to above tool holder height
+        _macro.addf("G53G0X%0.3fY%0.3f",_tool_mpos[tool_index][0],_tool_mpos[tool_index][1]); // move to tool location
         _macro.addf("G53G0Z%0.3f",feed_height);
-        _macro.addf("G62 P0"); // air on
+        _macro.addf("M62 P0"); // air on
         _macro.addf("G53G0Z%0.3f",_tool_mpos[tool_index][2]); // Drop down ontop of tool
-        _macro.addf("G63 P0"); // air on 
-        _macro.addf("G4 P1"); // wait for air to lock 
+        _macro.addf("M63 P0"); // air on 
+        _macro.addf("G4 P0.5"); // wait for air to lock 
+        _macro.addf("G53G0Y%0.3f",feed_point); // move tool into rack
+        move_to_safe_z();
     }
 
 
     void Custom_ATC::ets_probe(uint8_t tool_index) { 
         tool_index -= 1;
-        if (tool_index<=TOOL_COUNT){
-            float probe_height_offset=_ets_rapid_z_mpos+_tool_gauge[tool_index][1]; 
+        if (tool_index<=TOOL_COUNT-1){
+            float probe_height_offset=_ets_rapid_z_mpos+_tool_gauge[tool_index]; 
             _macro.addf("G53G0Z%0.3f",probe_height_offset);  // rapid down
         }
         else{
@@ -219,6 +227,6 @@ namespace ATCs {
     }
 
     namespace {
-        ATCFactory::InstanceBuilder<ATC> registration("atc");
+        ATCFactory::InstanceBuilder<Custom_ATC> registration("atc_custom");
     }
 }

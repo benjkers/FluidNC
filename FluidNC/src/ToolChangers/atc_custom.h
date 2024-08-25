@@ -1,4 +1,4 @@
-
+#pragma once
 
 #include "src/Config.h"
 
@@ -6,18 +6,15 @@
 
 #include "src/Channel.h"
 #include "src/Module.h"
+#include "atc.h"
+#include "../Machine/Macros.h"
 namespace ATCs {
 
     const int TOOL_COUNT = 6;
 
-    class Custom_ATC : public Configuration::Configurable {
-    protected:
-        const char* _name;
-        uint32_t    _last_tool = 0;
-        bool        _error     = false;
-
+    class Custom_ATC : public ATC {
     public:
-        Custom_ATC(const char* name) : _name(name) {}
+        Custom_ATC(const char* name) : ATC(name) {}
 
         Custom_ATC(const Custom_ATC&)            = delete;
         Custom_ATC(Custom_ATC&&)                 = delete;
@@ -25,8 +22,6 @@ namespace ATCs {
         Custom_ATC& operator=(Custom_ATC&&)      = delete;
 
         virtual ~Custom_ATC() = default;
-
-        const char* name() { return _name; }
 
     private:
         // config items
@@ -39,13 +34,13 @@ namespace ATCs {
         float              _ets_rapid_z_mpos = 0;
         std::vector<float> _tool_holder      ={ 0.0, -60, 60, 0.0, 0.0, 0.0 };
         std::vector<float> _tool_mpos[TOOL_COUNT];
-        std::vector<float> _tool_gauge[TOOL_COUNT];
+        std::vector<float> _tool_gauge ={0.0, 0.0 , 0.0, 0.0, 0.0, 0.0 };;
 
         bool    _is_OK                   = false;
         uint8_t _prev_tool               = 0;  // TODO This could be a NV setting
         bool    _have_tool_setter_offset = false;
         float   _tool_setter_offset      = 0.0;  // have we established an offset.
-        float   _tool_setter_position[MAX_N_AXIS];
+        
 
 
         void  move_to_safe_z();
@@ -59,21 +54,16 @@ namespace ATCs {
 
         Macro _macro;
     public:
-        virtual void init() = 0;
-
-        virtual void probe_notification();
-        virtual bool tool_change(uint8_t value, bool pre_select, bool set_tool) = 0;
-
-
-        // Configuration handlers:
+        void init() override;
+        void probe_notification() override;
+        virtual bool tool_change(uint8_t value, bool pre_select, bool set_tool) override;
         void validate() override {}
-        void afterParse() override {};
+       
         void group(Configuration::HandlerBase& handler) override {
             handler.item("safe_z_mpos_mm", _safe_z, -100000, 100000);
             handler.item("probe_seek_rate_mm_per_min", _probe_seek_rate, 1, 10000);
             handler.item("probe_feed_rate_mm_per_min", _probe_feed_rate, 1, 10000);
             handler.item("ets_mpos_mm", _ets_mpos);
-            handler.item("manual_change_mpos_mm", _manual_change_mpos);
             handler.item("manual_gauge_mm", _manual_gauge);
             handler.item("ets_rapid_z_mpos_mm", _ets_rapid_z_mpos);
             handler.item("tool1_mpos_mm", _tool_mpos[0]);
@@ -88,12 +78,10 @@ namespace ATCs {
             handler.item("tool4_gauge_mm", _tool_gauge[3]);
             handler.item("tool5_gauge_mm", _tool_gauge[4]);
             handler.item("tool6_gauge_mm", _tool_gauge[5]);
-            handler.item("tool_holder_mm", _tool_holder);
+            handler.item("tool_holder_pulloff_mm", _tool_holder);
            
         }
 
-    };
-
-    using ATCFactory = Configuration::GenericFactory<Custom_ATC>;
+    };   
 }
-extern ATCs::Custom_ATC* atc;
+
