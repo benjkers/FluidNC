@@ -130,7 +130,7 @@ namespace ATCs {
 
             // return to location before the tool change
             _macro.addf("G0X#<start_x>Y#<start_y>");
-            _macro.addf("G0Z#<start_z>");
+           // _macro.addf("G0Z#<start_z>");
 
             if (spindle_was_on) {
                 _macro.addf("M3");  // spindle should handle spinup delay
@@ -151,8 +151,8 @@ namespace ATCs {
     void Manual_ATC::reset() {
         _is_OK                   = true;
         _have_tool_setter_offset = false;
-        _prev_tool               = gc_state.tool;  // Double check this
-        _macro.addf("G4P0 0.1");                   // reset the TLO to 0
+       // _prev_tool               = gc_state.tool;  // Double check this
+        _macro.addf("G49");                   // reset the TLO to 0
         _macro.addf("(MSG: TLO Z reset to 0)");    //
     }
 
