@@ -211,10 +211,12 @@ namespace ATCs {
         if (tool_index<=TOOL_COUNT-1){
             float probe_height_offset=_ets_rapid_z_mpos+_tool_gauge[tool_index]; 
             _macro.addf("G53G0Z%0.3f",probe_height_offset);  // rapid down
+            _macro.addf("M62 P1"); // air on for dust off
         }
         else{
             float probe_height_offset=_ets_rapid_z_mpos+_manual_gauge; 
-            _macro.addf("G53G0Z%0.3f",probe_height_offset);  // rapid down  
+            _macro.addf("G53G0Z%0.3f",probe_height_offset);  // rapid down
+            _macro.addf("M62 P1"); // air on for dust off  
         }
         // do a fast probe if there is a seek that is faster than feed
         if (_probe_seek_rate > _probe_feed_rate) {
@@ -224,6 +226,7 @@ namespace ATCs {
 
         // do the feed rate probe
         _macro.addf("G53 G38.2 Z%0.3f F%0.3f", _ets_mpos[2], _probe_feed_rate);
+        _macro.addf("M63 P1"); // air off for dust off
     }
 
     namespace {
