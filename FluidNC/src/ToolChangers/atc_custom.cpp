@@ -34,6 +34,14 @@ namespace ATCs {
             _macro.run(nullptr);
             return true;
         }
+        if (new_tool == 100 || set_tool) { // if new tool is 100 hard reset doesnt drop off tool
+            _prev_tool = new_tool;
+            move_to_safe_z();
+            move_over_toolsetter();
+            reset();
+            _macro.run(nullptr);
+            return true;
+        }
 
         was_inch_mode = (gc_state.modal.units == Units::Inches);
 
@@ -110,6 +118,9 @@ namespace ATCs {
             }
             // else both tools are manual 
             else{
+                move_to_safe_z();
+                _macro.addf("G4P0 0.1");
+                move_over_toolsetter();
                 _macro.addf("G4P0 0.1");
                 _macro.addf("(MSG: Install tool #%d then resume to continue)", new_tool);
                 _macro.addf("M0");
@@ -129,10 +140,6 @@ namespace ATCs {
             _macro.addf("G43.1Z#<_my_tlo_z>");
 
             move_to_safe_z();
-
-            // return to location before the tool change
-            _macro.addf("G0X#<start_x>Y#<start_y>");
-            //_macro.addf("G0Z#<start_z>");
 
             if (spindle_was_on) {
                 _macro.addf("M3");  // spindle should handle spinup delay
@@ -211,12 +218,12 @@ namespace ATCs {
         if (tool_index<=TOOL_COUNT-1){
             float probe_height_offset=_ets_rapid_z_mpos+_tool_gauge[tool_index]; 
             _macro.addf("G53G0Z%0.3f",probe_height_offset);  // rapid down
-            _macro.addf("M62 P1"); // air on for dust off
+            
         }
         else{
             float probe_height_offset=_ets_rapid_z_mpos+_manual_gauge; 
             _macro.addf("G53G0Z%0.3f",probe_height_offset);  // rapid down
-            _macro.addf("M62 P1"); // air on for dust off  
+             
         }
         // do a fast probe if there is a seek that is faster than feed
         if (_probe_seek_rate > _probe_feed_rate) {
@@ -225,6 +232,8 @@ namespace ATCs {
         }
 
         // do the feed rate probe
+        _macro.addf("M62 P1"); // air on for dust off
+        _macro.addf("G4P1"); // wait for dust off
         _macro.addf("G53 G38.2 Z%0.3f F%0.3f", _ets_mpos[2], _probe_feed_rate);
         _macro.addf("M63 P1"); // air off for dust off
     }
