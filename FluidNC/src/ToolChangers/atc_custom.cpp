@@ -34,15 +34,7 @@ namespace ATCs {
             _macro.run(nullptr);
             return true;
         }
-        if (new_tool == 100 || set_tool) { // if new tool is 100 hard reset doesnt drop off tool
-            _prev_tool = new_tool;
-            move_to_safe_z();
-            move_over_toolsetter();
-            reset();
-            _macro.run(nullptr);
-            return true;
-        }
-
+       
         was_inch_mode = (gc_state.modal.units == Units::Inches);
 
         if (was_inch_mode) {
@@ -163,7 +155,8 @@ namespace ATCs {
        // _prev_tool               = gc_state.tool;  // Double check this
         _macro.addf("G4 P0.1");     
         _macro.addf("G49");                 // reset the TLO to 0
-        _macro.addf("(MSG: TLO Z reset to 0)");    //
+        _macro.addf("(MSG: TLO Z reset to 0)");
+        
     }
 
     void Custom_ATC::move_to_safe_z() {
