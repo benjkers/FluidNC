@@ -51,7 +51,6 @@ namespace ATCs {
         void  drop_tool(uint8_t tool_index);
         void  pick_tool(uint8_t tool_index);
 
-
         Macro _macro;
     public:
         void init() override;

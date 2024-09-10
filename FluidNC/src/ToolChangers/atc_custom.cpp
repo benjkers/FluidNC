@@ -80,9 +80,10 @@ namespace ATCs {
             if (!_have_tool_setter_offset) {
                 move_over_toolsetter();
                 ets_probe(_prev_tool);
-                _macro.addf("#<_ets_tool1_z>=[#5063]");  // save the value of the tool1 ETS Z
+                _macro.addf("#<_ets_tool_first_z>=[#5063]");  // save the value of the first tool ETS Z
                 _have_tool_setter_offset = true;
             }
+
 
             // if new and old tool live in the ATC rack 
             if((new_tool<=TOOL_COUNT) && (_prev_tool<=TOOL_COUNT)){ 
@@ -127,8 +128,8 @@ namespace ATCs {
 
             _prev_tool = new_tool; // reseting the old tool as the neww new tool
 
-            // TLO is simply the difference between the tool1 probe and the new tool probe.
-            _macro.addf("#<_my_tlo_z >=[#5063 - #<_ets_tool1_z>]");
+            // TLO is simply the difference between the firts tool probe and the new tool probe.
+            _macro.addf("#<_my_tlo_z >=[#5063 - #<_ets_tool_first_z>]");
             _macro.addf("G43.1Z#<_my_tlo_z>");
 
             move_to_safe_z();
@@ -152,7 +153,7 @@ namespace ATCs {
     void Custom_ATC::reset() {
         _is_OK                   = true;
         _have_tool_setter_offset = false;
-       // _prev_tool               = gc_state.tool;  // Double check this
+        _prev_tool               = gc_state.tool;  // Double check this
         _macro.addf("G4 P0.1");     
         _macro.addf("G49");                 // reset the TLO to 0
         _macro.addf("(MSG: TLO Z reset to 0)");
@@ -198,13 +199,15 @@ namespace ATCs {
         _macro.addf("G53G0X%0.3fY%0.3f",_tool_mpos[tool_index][0],_tool_mpos[tool_index][1]); // move to tool location
         _macro.addf("G53G0Z%0.3f",feed_height);
         _macro.addf("M62 P0"); // air on
-        _macro.addf("G53G0Z%0.3f",_tool_mpos[tool_index][2]); // Drop down ontop of tool
-        _macro.addf("M63 P0"); // air on 
-        _macro.addf("G4 P0.5"); // wait for air to lock 
+        _macro.addf("M8"); //Flood Coolent to wash chips off taper
+        _macro.addf("G4 P3");// wait to wash of chips
+        _macro.addf("G53G1Z%0.3fF1500",_tool_mpos[tool_index][2]); // Drop down ontop of tool
+        _macro.addf("M9"); //Flood Coolent off
+        _macro.addf("M63 P0"); // air off
+        _macro.addf("G4 P1"); // wait for air to lock 
         _macro.addf("G53G0Y%0.3f",feed_point); // move tool into rack
         move_to_safe_z();
     }
-
 
     void Custom_ATC::ets_probe(uint8_t tool_index) { 
         tool_index -= 1;
