@@ -182,7 +182,10 @@ enum class SetToolNumber : bool {
     Disable = 0,
     Enable  = 1,
 };
-
+enum class BreakDetection : bool {
+    Disable = 0,
+    Enable  = 1,
+};
 // Modal Group G12: Active work coordinate system
 // N/A: Stores coordinate system value (54-59) to change to.
 
@@ -261,6 +264,7 @@ struct gc_modal_t {
     SpindleState  spindle;       // {M3,M4,M5}
     ToolChange    tool_change;   // {M6}
     SetToolNumber set_tool_number;
+    BreakDetection Break_Detection;
     IoControl     io_control;  // {M62, M63, M67}
     Override      override;    // {M56}
 };

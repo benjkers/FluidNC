@@ -54,6 +54,7 @@ gc_modal_t modal_defaults = {
     SpindleState::Disable,
     ToolChange::Disable,
     SetToolNumber::Disable,
+    BreakDetection::Disable,
     IoControl::None,
     Override::ParkingMotion
 };
@@ -667,6 +668,10 @@ Error gc_execute_line(char* line) {
                                 break;
                         }
                         mg_word_bit = ModalGroup::MM8;
+                        break;
+                    case 12:  // M12 BreakDetection
+                        gc_block.modal.Break_Detection = BreakDetection::Enable;
+                        mg_word_bit                    = ModalGroup::MM6;
                         break;
                     case 56:
                         if (config->_enableParkingOverrideControl) {
@@ -1563,7 +1568,7 @@ Error gc_execute_line(char* line) {
                 gc_state.spindle_speed = 0.0;
                 gc_block.modal.spindle = SpindleState::Disable;
             }
-            spindle->tool_change(gc_state.selected_tool, false, false);
+            spindle->tool_change(gc_state.selected_tool, false, false, false);
             gc_state.tool      = gc_state.selected_tool;
             report_ovr_counter = 0;  // Set to report change immediately
             gc_ovr_changed();
@@ -1579,10 +1584,21 @@ Error gc_execute_line(char* line) {
             gc_state.spindle_speed = 0.0;
             gc_block.modal.spindle = SpindleState::Disable;
         }
-        spindle->tool_change(gc_state.selected_tool, false, true);
+        spindle->tool_change(gc_state.selected_tool, false, true, false);
         report_ovr_counter = 0;  // Set to report change immediately
         gc_ovr_changed();
     }
+
+    if (gc_block.modal.Break_Detection == BreakDetection::Enable) {  
+        spindle->stop();  // stop the new spindle
+        gc_state.spindle_speed = 0.0;
+        gc_block.modal.spindle = SpindleState::Disable; 
+        spindle->tool_change(gc_state.tool, false, false, true);
+        report_ovr_counter = 0;  // Set to report change immediately
+        gc_ovr_changed();
+        
+    }
+
     // [7. Spindle control ]:
     if (gc_state.modal.spindle != gc_block.modal.spindle) {
         // Update spindle control and apply spindle speed when enabling it in this block.

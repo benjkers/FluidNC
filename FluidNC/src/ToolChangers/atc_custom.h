@@ -55,7 +55,7 @@ namespace ATCs {
     public:
         void init() override;
         void probe_notification() override;
-        virtual bool tool_change(uint8_t value, bool pre_select, bool set_tool) override;
+        virtual bool tool_change(uint8_t value, bool pre_select, bool set_tool, bool tool_break_detection) override;
         void validate() override {}
        
         void group(Configuration::HandlerBase& handler) override {

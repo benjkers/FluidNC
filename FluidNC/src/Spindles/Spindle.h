@@ -62,7 +62,7 @@ namespace Spindles {
         virtual bool    isRateAdjusted();
         virtual bool    use_delay_settings() const { return true; }
         virtual uint8_t get_current_tool_num() { return _current_tool; }
-        virtual bool    tool_change(uint32_t tool_number, bool pre_select, bool set_tool);
+        virtual bool    tool_change(uint32_t tool_number, bool pre_select, bool set_tool, bool tool_break_detection);
 
         virtual void setSpeedfromISR(uint32_t dev_speed) = 0;
 

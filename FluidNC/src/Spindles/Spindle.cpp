@@ -132,10 +132,10 @@ namespace Spindles {
 
     // pre_select is generally ignored except for machines that need to get a tool ready
     // set_tool is just used to tell the atc what is already installed.
-    bool Spindle::tool_change(uint32_t tool_number, bool pre_select, bool set_tool) {
+    bool Spindle::tool_change(uint32_t tool_number, bool pre_select, bool set_tool, bool tool_break_detection) {
         if (_atc != NULL) {
             log_info(_name << " spindle changed to tool:" << tool_number << " using ATC:" << _atc_name);
-            return _atc->tool_change(tool_number, pre_select, set_tool);
+            return _atc->tool_change(tool_number, pre_select, set_tool, tool_break_detection);
         }
         if (!_m6_macro.get().empty()) {
             log_info(_name << " spindle changed to tool:" << tool_number << " using m6_macro");

@@ -13,7 +13,7 @@ namespace ATCs {
 
     void Custom_ATC::probe_notification() {}
 
-    bool Custom_ATC::tool_change(uint8_t new_tool, bool pre_select, bool set_tool) {
+    bool Custom_ATC::tool_change(uint8_t new_tool, bool pre_select, bool set_tool, bool tool_break_detection) {
         bool spindle_was_on = false;  // used to restore the spindle state
         bool was_inch_mode  = false;  // allows use to restore inch mode if req'd
 
@@ -26,6 +26,17 @@ namespace ATCs {
             if(_prev_tool>0 && _prev_tool<=TOOL_COUNT){
                 move_to_safe_z();
                 drop_tool(_prev_tool);
+            }
+            if(set_tool){
+                move_over_toolsetter();
+                ets_probe(new_tool);
+                _macro.addf("#<_ets_tool_first_z>=[#5063]");  // save the value of the first tool ETS Z
+                _macro.addf("#<_my_tlo_z >=0");  // Initalizing tool length offset
+                move_to_safe_z();
+                _have_tool_setter_offset = true;           
+                _macro.run(nullptr);
+                _prev_tool = new_tool;
+                return true;
             }
             _prev_tool = new_tool;
             move_to_safe_z();
@@ -42,6 +53,14 @@ namespace ATCs {
         }
 
         try {
+
+            
+            // turn off the spindle
+            if (gc_state.modal.spindle != SpindleState::Disable) {
+                spindle_was_on = true;
+                _macro.addf("M5");
+            }
+
             if (_prev_tool == 0) {  // M6T<anything> from T0 is used for a change before zero'ing
 
                 if(new_tool<=TOOL_COUNT){
@@ -54,37 +73,43 @@ namespace ATCs {
                     _macro.addf("G43.1Z0.000");
                     _macro.addf("(MSG : Install tool #%d)", new_tool);
                 }
-                
+
                 if (was_inch_mode) {
                     _macro.addf("G20");
                 }
+                // determine tool offset for first tool.
+                move_over_toolsetter();
+                ets_probe(new_tool);
+                _macro.addf("#<_ets_tool_first_z>=[#5063]");  // save the value of the first tool ETS Z
+                _macro.addf("#<_my_tlo_z >=0");  // Initalizing tool length offset
+                move_to_safe_z();
+                _have_tool_setter_offset = true;           
                 _macro.run(nullptr);
                 _prev_tool = new_tool;
                 return true;
             }
-
-            // save current location, so we can return after the tool change.
-            _macro.addf("#<start_x >= #<_x>");
-            _macro.addf("#<start_y >= #<_y>");
-            _macro.addf("#<start_z >= #<_z>");
-
             move_to_safe_z();
 
-            // turn off the spindle
-            if (gc_state.modal.spindle != SpindleState::Disable) {
-                spindle_was_on = true;
-                _macro.addf("M5");
-            }
-
-            // if we have not determined the tool setter offset yet, we need to do that.
             if (!_have_tool_setter_offset) {
                 move_over_toolsetter();
-                ets_probe(_prev_tool);
+                ets_probe(new_tool);
                 _macro.addf("#<_ets_tool_first_z>=[#5063]");  // save the value of the first tool ETS Z
-                _have_tool_setter_offset = true;
+                _macro.addf("#<_my_tlo_z >=0");  // Initalizing tool length offset
+                move_to_safe_z();
+                _have_tool_setter_offset = true;  
+            }         
+            
+            if(tool_break_detection && _have_tool_setter_offset){
+            _macro.addf("(MSG: Break Detection)");
+            move_over_toolsetter();
+            ets_probe(_prev_tool);
+            _macro.addf("$SD/Run=BreakDetection.nc");
+            move_to_safe_z();
+            _macro.run(nullptr);
+            return true;
             }
 
-
+            
             // if new and old tool live in the ATC rack 
             if((new_tool<=TOOL_COUNT) && (_prev_tool<=TOOL_COUNT)){ 
                     move_to_safe_z();
@@ -129,7 +154,8 @@ namespace ATCs {
             _prev_tool = new_tool; // reseting the old tool as the neww new tool
 
             // TLO is simply the difference between the firts tool probe and the new tool probe.
-            _macro.addf("#<_my_tlo_z >=[#5063 - #<_ets_tool_first_z>]");
+            _macro.addf("#<_my_tlo_z>=[#5063 - #<_ets_tool_first_z>]");
+            _macro.addf("(MSG, Tool length offset %f#<_my_tlo_z>)");
             _macro.addf("G43.1Z#<_my_tlo_z>");
 
             move_to_safe_z();
@@ -159,7 +185,7 @@ namespace ATCs {
         _macro.addf("(MSG: TLO Z reset to 0)");
         
     }
-
+    
     void Custom_ATC::move_to_safe_z() {
         _macro.addf("G53G0Z%0.3f", _safe_z);
     }
@@ -197,10 +223,10 @@ namespace ATCs {
         feed_height=_tool_mpos[tool_index][2]+_tool_holder[2]; // move z to above tool holder height
         feed_point=_tool_mpos[tool_index][1]+_tool_holder[1]; // move z to above tool holder height
         _macro.addf("G53G0X%0.3fY%0.3f",_tool_mpos[tool_index][0],_tool_mpos[tool_index][1]); // move to tool location
+        _macro.addf("M8"); //Flood Coolent to wash chips off taper
+        _macro.addf("G4 P1.5");// wait to wash of chips    
         _macro.addf("G53G0Z%0.3f",feed_height);
         _macro.addf("M62 P0"); // air on
-        _macro.addf("M8"); //Flood Coolent to wash chips off taper
-        _macro.addf("G4 P3");// wait to wash of chips
         _macro.addf("G53G1Z%0.3fF1500",_tool_mpos[tool_index][2]); // Drop down ontop of tool
         _macro.addf("M9"); //Flood Coolent off
         _macro.addf("M63 P0"); // air off
