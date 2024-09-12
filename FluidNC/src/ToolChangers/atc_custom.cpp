@@ -21,23 +21,13 @@ namespace ATCs {
         _macro.erase();             // clear previous gcode
 
         // M6T0 is used to reset this ATC and allow us to start a new job
-        if (new_tool == 0 || set_tool) {
+        if (new_tool == 0) {
             
             if(_prev_tool>0 && _prev_tool<=TOOL_COUNT){
                 move_to_safe_z();
                 drop_tool(_prev_tool);
             }
-            if(set_tool){
-                move_over_toolsetter();
-                ets_probe(new_tool);
-                _macro.addf("#<_ets_tool_first_z>=[#5063]");  // save the value of the first tool ETS Z
-                _macro.addf("#<_my_tlo_z >=0");  // Initalizing tool length offset
-                move_to_safe_z();
-                _have_tool_setter_offset = true;           
-                _macro.run(nullptr);
-                _prev_tool = new_tool;
-                return true;
-            }
+            
             _prev_tool = new_tool;
             move_to_safe_z();
             move_over_toolsetter();
@@ -84,8 +74,8 @@ namespace ATCs {
                 _macro.addf("#<_my_tlo_z >=0");  // Initalizing tool length offset
                 move_to_safe_z();
                 _have_tool_setter_offset = true;           
-                _macro.run(nullptr);
                 _prev_tool = new_tool;
+                _macro.run(nullptr);
                 return true;
             }
             move_to_safe_z();
@@ -155,7 +145,7 @@ namespace ATCs {
 
             // TLO is simply the difference between the firts tool probe and the new tool probe.
             _macro.addf("#<_my_tlo_z>=[#5063 - #<_ets_tool_first_z>]");
-            _macro.addf("(MSG, Tool length offset %f#<_my_tlo_z>)");
+            _macro.addf("D#<_my_tlo_z>");
             _macro.addf("G43.1Z#<_my_tlo_z>");
 
             move_to_safe_z();
@@ -179,7 +169,7 @@ namespace ATCs {
     void Custom_ATC::reset() {
         _is_OK                   = true;
         _have_tool_setter_offset = false;
-        _prev_tool               = gc_state.tool;  // Double check this
+        //_prev_tool               = gc_state.tool;  // Double check this
         _macro.addf("G4 P0.1");     
         _macro.addf("G49");                 // reset the TLO to 0
         _macro.addf("(MSG: TLO Z reset to 0)");
