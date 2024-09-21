@@ -1560,7 +1560,7 @@ Error gc_execute_line(char* line) {
     //	gc_state.tool = gc_block.values.t;
     // [M6. Change tool ]:
     if (gc_block.modal.tool_change == ToolChange::Enable) {
-        if (gc_state.selected_tool != gc_state.tool) {
+        if (gc_state.selected_tool != gc_state.tool || gc_state.selected_tool==0 ) {
             bool stopped_spindle;
             Spindles::Spindle::switchSpindle(gc_state.selected_tool, Spindles::SpindleFactory::objects(), spindle, stopped_spindle);
             if (stopped_spindle) {

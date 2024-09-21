@@ -214,10 +214,10 @@ namespace ATCs {
         feed_point=_tool_mpos[tool_index][1]+_tool_holder[1]; // move z to above tool holder height
         _macro.addf("G53G0X%0.3fY%0.3f",_tool_mpos[tool_index][0],_tool_mpos[tool_index][1]); // move to tool location
         _macro.addf("M8"); //Flood Coolent to wash chips off taper
-        _macro.addf("G4 P1.5");// wait to wash of chips    
+        _macro.addf("G4 P%0.3f",_wash_time);// wait to wash of chips    
         _macro.addf("G53G0Z%0.3f",feed_height);
         _macro.addf("M62 P0"); // air on
-        _macro.addf("G53G1Z%0.3fF1500",_tool_mpos[tool_index][2]); // Drop down ontop of tool
+        _macro.addf("G53G1Z%0.3fF1000",_tool_mpos[tool_index][2]); // Drop down ontop of tool
         _macro.addf("M9"); //Flood Coolent off
         _macro.addf("M63 P0"); // air off
         _macro.addf("G4 P1"); // wait for air to lock 
