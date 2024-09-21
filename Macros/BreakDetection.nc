@@ -7,5 +7,6 @@ G53G0X0Y0
 M5
 M9
 (Tool Broken)
+$Alarm/Send=13
 M30 
 o102 endif 
