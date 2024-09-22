@@ -6,14 +6,14 @@ G21 ;metric
 M5   ;Stop spindle
 G59 ; 4th axis work coordinates
 
-#<P1X>=#<_x> (Setting Current X postiong from G59)
+#<P1X>=#<_x> (Setting Current X postiong from G53)
 G38.7 z[-2*#<ClearanceHeight>] f200
 G91 G1 Z2 f200
 $SD/Run=Probing/ProbeZ.nc
 #<P1Z>=#<_Result>
 G38.7 z[#<ClearanceHeight>] F1000
 G38.7 x[-1*#<P1X>*2] f1000
-#<P2X>=#<_x>(Setting Current X postiong from G59)
+#<P2X>=#<_x>(Setting Current X postiong from G53)
 
 G38.7 z[-2*#<ClearanceHeight>] f200
 G91 G1 Z2 f200
@@ -28,7 +28,7 @@ D#<Distance>
 D#<Height>
 G38.7 B[#<AngleDeg>] f4000
 G38.7 X[#<Distance>] f1000
-G10 L20 P6 B0
+G10 L20 P[#<Coordinate>-53] B0
 G38.7 Z-100 F200
 G1 z[#<ClearanceHeight>] f1000
 G38.7 X15 f1000
@@ -54,7 +54,7 @@ G90 G53 G1 z0 f1000
 G59 G38.7 B-180 f3000
 #<Xcenter>=[[#<side1>-#<side2>]/2+#<side2>]
 G90 G53 G1 x[#<Xcenter>] f3000
-G10 L20 P6  X0
+G10 L20 P[#<Coordinate>-53]  X0
 
 
 
