@@ -19,7 +19,7 @@ namespace Configuration {
 
         GenericFactory() = default;
 
-        GenericFactory(const GenericFactory&)            = delete;
+        GenericFactory(const GenericFactory&) = delete;
         GenericFactory& operator=(const GenericFactory&) = delete;
 
         class BuilderBase {
@@ -28,7 +28,7 @@ namespace Configuration {
         public:
             BuilderBase(const char* name) : name_(name) {}
 
-            BuilderBase(const BuilderBase& o)            = delete;
+            BuilderBase(const BuilderBase& o) = delete;
             BuilderBase& operator=(const BuilderBase& o) = delete;
 
             virtual BaseType* create(const char* name) const = 0;
@@ -50,7 +50,19 @@ namespace Configuration {
         template <typename DerivedType>
         class InstanceBuilder : public BuilderBase {
         public:
-            explicit InstanceBuilder(const char* name, bool autocreate = false) : BuilderBase(name) {
+            explicit InstanceBuilder(const char* name, bool autocreate) : BuilderBase(name) {
+                instance().registerBuilder(this);
+                add(create(name));
+            }
+            explicit InstanceBuilder(const char* name) : BuilderBase(name) { instance().registerBuilder(this); }
+
+            BaseType* create(const char* name) const override { return new DerivedType(name); }
+        };
+
+        template <typename DerivedType, typename DependencyType>
+        class DependentInstanceBuilder : public BuilderBase {
+        public:
+            explicit DependentInstanceBuilder(const char* name, bool autocreate = false) : BuilderBase(name) {
                 instance().registerBuilder(this);
                 if (autocreate) {
                     auto& objects = instance().objects_;
@@ -59,7 +71,10 @@ namespace Configuration {
                 }
             }
 
-            BaseType* create(const char* name) const override { return new DerivedType(name); }
+            DerivedType* create(const char* name) const override {
+                auto dependency = new DependencyType();
+                return new DerivedType(name, dependency);
+            }
         };
 
         // This factory() method is used when there can be only one instance of the type,
@@ -78,6 +93,7 @@ namespace Configuration {
                 handler.enterSection(inst->name(), inst);
             }
         }
+
         // This factory() method is used when there can be multiple instances,
         // as with spindles and modules.  A vector in the GenericFactory<BaseType>
         // singleton holds the derived type instances, so there is no need to
@@ -93,14 +109,12 @@ namespace Configuration {
                     builders.begin(), builders.end(), [&](auto& builder) { return handler.matchesUninitialized(builder->name()); });
                 if (it != builders.end()) {
                     auto name = (*it)->name();
-                    auto it2 =
-                        std::find_if(objects.begin(), objects.end(), [&](auto& object) { return strcasecmp(object->name(), name) == 0; });
                     // If the config file contains multiple factory sections with the same name,
                     // for example two laser: sections or oled: sections, create a new node
                     // for each repetition.  FluidNC can thus support multiple lasers with
                     // different tool numbers and output pins, multiple OLED displays, etc
                     auto object = (*it)->create(name);
-                    objects.push_back(object);
+                    add(object);
                     handler.enterFactory(name, *object);
                 }
             } else {

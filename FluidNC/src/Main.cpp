@@ -90,13 +90,15 @@ void setup() {
             }
         }
 
-        config->_stepping->init();  // Configure stepper interrupt timers
+        Stepping::init();  // Configure stepper interrupt timers
 
         plan_init();
 
         config->_userOutputs->init();
 
-        config->_axes->init();
+        config->_userInputs->init();
+
+        Axes::init();
 
         config->_control->init();
 
@@ -106,6 +108,9 @@ void setup() {
 
         // Initialize system state.
         for (auto const& module : Modules()) {
+            module->init();
+        }
+        for (auto const& module : ConfigurableModules()) {
             module->init();
         }
 
