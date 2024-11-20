@@ -44,9 +44,9 @@ namespace Spindles {
             data.msg[3] = 0x02;
             data.msg[4] = effective_speed >> 8;
             data.msg[5] = effective_speed & 0xFF;
-                }
+        }
 
-         VFDProtocol::response_parser CumarkProtocol::get_current_speed(ModbusCommand& data) {
+        VFDProtocol::response_parser CumarkProtocol::get_current_speed(ModbusCommand& data) {
             // NOTE: data length is excluding the CRC16 checksum.
             data.tx_length = 6;
             data.rx_length = 5;
@@ -59,7 +59,7 @@ namespace Spindles {
             data.msg[5] = 0x01;
 
             return [](const uint8_t* response, VFDSpindle* vfd, VFDProtocol* detail) -> bool {
-                uint16_t RPM = (response[4] << 8) | response[5];
+                uint32_t RPM = (response[4] << 8) | response[5];
 
                 // Store speed for synchronization
                 vfd->_sync_dev_speed = RPM;
