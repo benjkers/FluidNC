@@ -121,7 +121,7 @@ namespace Spindles {
            };
         }
 
-        VFDProtocol::response_parser CumarkProtocol::initialization_sequence(int index, ModbusCommand& data) {
+        VFDProtocol::response_parser CumarkProtocol::initialization_sequence(int index, ModbusCommand& data, VFDSpindle* vfd) {
             switch (index) {
                 case -1:
                     data.tx_length = 6;
