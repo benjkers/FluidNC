@@ -153,7 +153,7 @@ void polling_loop(void* unused) {
                 // channels to see if one has a line ready.
                 activeChannel = pollChannels(activeLine);
             } else {
-                if (state_is(State::Alarm) || state_is(State::ConfigAlarm)) {
+                if (state_is(State::Alarm) || state_is(State::ConfigAlarm) || state_is(State::Critical)) {
                     log_debug("Unwinding from Alarm");
                     Job::abort();
                     unwind_cause = nullptr;
@@ -449,9 +449,8 @@ static void protocol_do_start() {
         send_alarm(ExecAlarm::Init);
         return;
     }
-    Homing::set_all_axes_homed();
-    if (config->_start->_mustHome && Machine::Axes::homingMask) {
-        Homing::set_all_axes_unhomed();
+    Homing::set_all_axes_unhomed();
+    if (Homing::unhomed_axes()) {
         // If there is an axis with homing configured, enter Alarm state on startup
         send_alarm(ExecAlarm::Unhomed);
     } else {
@@ -465,35 +464,41 @@ static void protocol_do_alarm(void* alarmVoid) {
     if (spindle->_off_on_alarm) {
         spindle->stop();
     }
-    alarm_msg(lastAlarm);
+    // It is important to do set_state() before alarm_msg() because the
+    // latter can cause a task switch that can introduce a race condition
+    // whereby polling_loop() does not see the state change.
     if (lastAlarm == ExecAlarm::HardLimit || lastAlarm == ExecAlarm::HardStop) {
-        set_state(State::Critical);  // Set system alarm state
-        report_error_message(Message::CriticalEvent);
         protocol_disable_steppers();
         Homing::set_all_axes_unhomed();
+        set_state(State::Critical);  // Set system alarm state
+        alarm_msg(lastAlarm);
+        report_error_message(Message::CriticalEvent);
         return;
     }
     if (lastAlarm == ExecAlarm::SoftLimit) {
         set_state(State::Critical);  // Set system alarm state
+        alarm_msg(lastAlarm);
         report_error_message(Message::CriticalEvent);
         return;
     }
     set_state(State::Alarm);
+    alarm_msg(lastAlarm);
 }
 
 static void protocol_start_holding() {
     if (!(sys.suspend.bit.motionCancel || sys.suspend.bit.jogCancel)) {  // Block, if already holding.
         sys.step_control = {};
-        if (!Stepper::update_plan_block_parameters()) {  // Notify stepper module to recompute for hold deceleration.
-            sys.step_control.endMotion = true;
-        }
+        Stepper::update_plan_block_parameters();
         sys.step_control.executeHold = true;  // Initiate suspend state with active flag.
     }
 }
 
 static void protocol_cancel_jogging() {
-    if (!sys.suspend.bit.motionCancel) {
-        sys.suspend.bit.jogCancel = true;
+    if (!(sys.suspend.bit.motionCancel || sys.suspend.bit.jogCancel)) {  // Block, if already holding.
+        sys.step_control = {};
+        Stepper::update_plan_block_parameters();
+        sys.step_control.executeHold = true;  // Initiate suspend state with active flag.
+        sys.suspend.bit.jogCancel    = true;
     }
 }
 
@@ -525,7 +530,6 @@ void protocol_do_motion_cancel() {
             break;
 
         case State::Jog:
-            protocol_start_holding();
             protocol_cancel_jogging();
             // When jogging, we do not set motionCancel, hence return not break
             return;
@@ -571,7 +575,6 @@ static void protocol_do_feedhold() {
             break;
 
         case State::Jog:
-            protocol_start_holding();
             protocol_cancel_jogging();
             return;  // Do not change the state to Hold
     }
@@ -623,7 +626,6 @@ static void protocol_do_safety_door() {
             protocol_start_holding();
             break;
         case State::Jog:
-            protocol_start_holding();
             protocol_cancel_jogging();
             break;
     }
@@ -743,7 +745,7 @@ void protocol_disable_steppers() {
         Axes::set_disable(false);
         return;
     }
-    if (state_is(State::Sleep) || state_is(State::Alarm)) {
+    if (state_is(State::Sleep)) {
         // Disable steppers immediately in sleep or alarm state
         Axes::set_disable(true);
         return;

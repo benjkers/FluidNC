@@ -65,11 +65,14 @@ gc_modal_t modal_defaults = {
 
 void gc_init() {
     // Reset parser state:
+    auto save_tlo = gc_state.tool_length_offset;  // we want TLO to persist until reboot.
     memset(&gc_state, 0, sizeof(parser_state_t));
+    gc_state.tool_length_offset = save_tlo;
 
     // Load default G54 coordinate system.
     gc_state.modal          = modal_defaults;
     gc_state.modal.override = config->_start->_deactivateParking ? Override::Disabled : Override::ParkingMotion;
+    gc_state.current_tool   = -1;
     coords[gc_state.modal.coord_select]->get(gc_state.coord_system);
     flowcontrol_init();
 }
@@ -190,12 +193,13 @@ void collapseGCode(char* line) {
                 *outPtr = '\0';
                 return;
             case '%':
-                // TODO: Install '%' feature
-                // Program start-end percent sign NOT SUPPORTED.
-                // NOTE: This may be installed to distinguish between program running vs manual input,
-                // where, during a program, the system auto-cycle start will continue to execute
-                // everything until the next '%' sign. This will help fix resuming issues with certain
-                // functions that empty the planner buffer to execute its task on-time.
+                // Per https://linuxcnc.org/docs/html/gcode/overview.html#gcode:file-requirements
+                // % only applies to "job" channels like files and macros, not to serial channels
+                // where the sequence of lines is potentially never-ending.  A sender that handles
+                // files on the host system could apply the % semantics.
+                if (Job::active()) {
+                    Job::channel()->percent();
+                }
                 break;
             case '\r':
                 // In case one sneaks in
@@ -1609,44 +1613,50 @@ Error gc_execute_line(char* line) {
         pl_data->spindle_speed = gc_state.spindle_speed;  // Record data for planner use.
     }                                                     // else { pl_data->spindle_speed = 0.0; } // Initialized as zero already.
     // [5. Select tool ]: NOT SUPPORTED. Only tracks tool value.
-    //	gc_state.tool = gc_block.values.t;
     // [M6. Change tool ]:
     if (gc_block.modal.tool_change == ToolChange::Enable) {
-        if (gc_state.selected_tool != gc_state.tool || gc_state.selected_tool==0 ) {
-            bool stopped_spindle;
-            Spindles::Spindle::switchSpindle(gc_state.selected_tool, Spindles::SpindleFactory::objects(), spindle, stopped_spindle);
+        if (gc_state.selected_tool != gc_state.current_tool) {
+            bool stopped_spindle = false;   // was spindle stopped via the change
+            bool new_spindle     = false;   // was the spindle changed
+            protocol_buffer_synchronize();  // wait for motion in buffer to finish
+
+            Spindles::Spindle::switchSpindle(
+                gc_state.selected_tool, Spindles::SpindleFactory::objects(), spindle, stopped_spindle, new_spindle);
             if (stopped_spindle) {
-                spindle->stop();  // stop the new spindle
-                gc_state.spindle_speed = 0.0;
                 gc_block.modal.spindle = SpindleState::Disable;
             }
-            spindle->tool_change(gc_state.selected_tool, false, false, false);
-            gc_state.tool      = gc_state.selected_tool;
+            if (new_spindle) {
+                gc_state.spindle_speed = 0.0;
+            }
+            log_info("Sel:" << gc_state.selected_tool << " Cur:" << gc_state.current_tool);
+            spindle->tool_change(gc_state.selected_tool, false, false,false);
+            if (spindle->_atc_name == "" && spindle->_m6_macro.get().empty()) {  // if neither of these exist we need to set the value here
+                gc_state.current_tool = gc_state.selected_tool;
+            }
             report_ovr_counter = 0;  // Set to report change immediately
             gc_ovr_changed();
         }
     }
-    if (gc_block.modal.set_tool_number == SetToolNumber::Enable) {
+    if (gc_block.modal.set_tool_number == SetToolNumber::Enable) {  // M61
+        if (gc_block.values.q < 0) {
+            FAIL(Error::NegativeValue);  // https://linuxcnc.org/docs/2.8/html/gcode/m-code.html#mcode:m61
+        }
         gc_state.selected_tool = gc_block.values.q;
-        gc_state.tool          = gc_state.selected_tool;
-        bool stopped_spindle;
-        Spindles::Spindle::switchSpindle(gc_state.selected_tool, Spindles::SpindleFactory::objects(), spindle, stopped_spindle);
+        bool stopped_spindle   = false;  // was spindle stopped via the change
+        bool new_spindle       = false;  // was the spindle changed
+        protocol_buffer_synchronize();   // wait for motion in buffer to finish
+        Spindles::Spindle::switchSpindle(gc_state.selected_tool, Spindles::SpindleFactory::objects(), spindle, stopped_spindle, new_spindle);
         if (stopped_spindle) {
             spindle->stop();  // stop the new spindle
             gc_state.spindle_speed = 0.0;
             gc_block.modal.spindle = SpindleState::Disable;
         }
-        spindle->tool_change(gc_state.selected_tool, false, true, false);
-        report_ovr_counter = 0;  // Set to report change immediately
-        gc_ovr_changed();
-    }
-
-    if (gc_block.modal.Break_Detection == BreakDetection::Enable) {  
-        spindle->stop();  // stop the new spindle
-        gc_state.spindle_speed = 0.0;
-        gc_block.modal.spindle = SpindleState::Disable; 
-        spindle->tool_change(gc_state.tool, false, false, true);
-        report_ovr_counter = 0;  // Set to report change immediately
+        if (new_spindle) {
+            gc_state.spindle_speed = 0.0;
+        }
+        spindle->tool_change(gc_state.selected_tool, false, true,false);
+        gc_state.current_tool = gc_block.values.q;
+        report_ovr_counter    = 0;  // Set to report change immediately
         gc_ovr_changed();
         
     }
@@ -1795,10 +1805,10 @@ Error gc_execute_line(char* line) {
     switch (gc_block.non_modal_command) {
         case NonModal::SetCoordinateData:
             coords[coord_select]->set(coord_data);
+            gc_wco_changed();
             // Update system coordinate system if currently active.
             if (gc_state.modal.coord_select == coord_select) {
                 copyAxes(gc_state.coord_system, coord_data);
-                gc_wco_changed();
             }
             break;
         case NonModal::GoHome0:
@@ -1901,7 +1911,6 @@ Error gc_execute_line(char* line) {
 
             if (Job::active()) {
                 Job::channel()->end();
-                break;
             }
             // Upon program complete, only a subset of g-codes reset to certain defaults, according to
             // LinuxCNC's program end descriptions and testing. Only modal groups [G-code 1,2,3,5,7,12]

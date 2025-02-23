@@ -26,9 +26,10 @@ namespace Spindles {
     class Spindle : public Configuration::Configurable {
     private:
         const char* _name;
+        std::string _atc_info = "";
 
     protected:
-        ATCs::ATC* _atc       = NULL;
+        ATCs::ATC* _atc       = nullptr;
         uint32_t   _last_tool = 0;
 
     public:
@@ -47,12 +48,12 @@ namespace Spindles {
         void     shelfSpeeds(SpindleSpeed min, SpindleSpeed max);
         void     linearSpeeds(SpindleSpeed maxSpeed, float maxPercent);
 
-        static void switchSpindle(uint32_t new_tool, SpindleList spindles, Spindle*& spindle, bool& stop_spindle);
+        static void switchSpindle(uint32_t new_tool, SpindleList spindles, Spindle*& spindle, bool& stop_spindle, bool& new_spindle);
 
         void         spindleDelay(SpindleState state, SpindleSpeed speed);
         virtual void init() = 0;  // not in constructor because this also gets called when $$ settings change
         virtual void init_atc();
-        std::string  atc_info();
+        std::string  atc_info() { return _atc_info; };
 
         // Used by Protocol.cpp to restore the state during a restart
         virtual void    setState(SpindleState state, uint32_t speed) = 0;

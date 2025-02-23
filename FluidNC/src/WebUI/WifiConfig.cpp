@@ -255,16 +255,16 @@ namespace WebUI {
                                 modeName = "???";
                         }
 
-                        j.id_value_object("Phy Mode: ", modeName);
-                        j.id_value_object("Channel: ", WiFi.channel());
+                        j.id_value_object("Phy Mode", modeName);
+                        j.id_value_object("Channel", WiFi.channel());
 
                         tcpip_adapter_dhcp_status_t dhcp_status;
                         tcpip_adapter_dhcpc_get_status(TCPIP_ADAPTER_IF_STA, &dhcp_status);
-                        j.id_value_object("IP Mode: ", (dhcp_status == TCPIP_ADAPTER_DHCP_STARTED ? "DHCP" : "Static"));
-                        j.id_value_object("IP: ", IP_string(WiFi.localIP()));
-                        j.id_value_object("Gateway: ", IP_string(WiFi.gatewayIP()));
-                        j.id_value_object("Mask: ", IP_string(WiFi.subnetMask()));
-                        j.id_value_object("DNS: ", IP_string(WiFi.dnsIP()));
+                        j.id_value_object("IP Mode", (dhcp_status == TCPIP_ADAPTER_DHCP_STARTED ? "DHCP" : "Static"));
+                        j.id_value_object("IP", IP_string(WiFi.localIP()));
+                        j.id_value_object("Gateway", IP_string(WiFi.gatewayIP()));
+                        j.id_value_object("Mask", IP_string(WiFi.subnetMask()));
+                        j.id_value_object("DNS", IP_string(WiFi.dnsIP()));
 
                     }  //this is web command so connection => no command
                     j.id_value_object("Disabled Mode", std::string("AP (") + WiFi.softAPmacAddress().c_str() + ")");
@@ -275,9 +275,9 @@ namespace WebUI {
                     wifi_country_t country;
                     esp_wifi_get_config(WIFI_IF_AP, &conf);
                     esp_wifi_get_country(&country);
-                    j.id_value_object("SSID: ", (const char*)conf.ap.ssid);
-                    j.id_value_object("Visible: ", (conf.ap.ssid_hidden == 0 ? "Yes" : "No"));
-                    j.id_value_object("Radio country set: ",
+                    j.id_value_object("SSID", (const char*)conf.ap.ssid);
+                    j.id_value_object("Visible", (conf.ap.ssid_hidden == 0 ? "Yes" : "No"));
+                    j.id_value_object("Radio country set",
                                       std::string("") + country.cc[0] + country.cc[1] + " (channels " + std::to_string(country.schan) +
                                           "-" + std::to_string((country.schan + country.nchan - 1)) + ", max power " +
                                           std::to_string(country.max_tx_power) + "dBm)");
@@ -512,9 +512,23 @@ namespace WebUI {
                 j.member("Authentication", "Disabled");
 #endif
                 j.member("WebCommunication", "Synchronous");
-                j.member("WebSocketIP", "localhost");
 
-                j.member("WebSocketPort", "82");
+                switch (WiFi.getMode()) {
+                  case WIFI_AP:
+                    j.member("WebSocketIP", IP_string(WiFi.softAPIP()));
+                    break;
+                  case WIFI_STA:
+                    j.member("WebSocketIP", IP_string(WiFi.localIP()));
+                    break;
+                  case WIFI_AP_STA:
+                    j.member("WebSocketIP", IP_string(WiFi.softAPIP()));
+                    break;
+                  default:
+                    j.member("WebSocketIP", "0.0.0.0");
+                    break;
+                }
+
+                j.member("WebSocketPort", std::to_string(Web_Server::port() + 2));
                 j.member("HostName", WiFi.getHostname());
                 j.member("WiFiMode", modeName());
                 j.member("FlashFileSystem", "LittleFS");
