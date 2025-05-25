@@ -155,9 +155,11 @@ static int i2s_out_start() {
 static bool timer_running = false;
 
 void i2s_out_delay() {
-    // Depending on the timing, it may not be reflected immediately,
-    // so wait twice as long just in case.
-    uint32_t wait_counts = timer_running ? FIFO_THRESHOLD + FIFO_RELOAD : 2;
+    // Empirically, FIFO_LENGTH/2 seems to be enough, but we use
+    // FIFO_LENGTH to be safe.  This function is used infrequently,
+    // typically only when setting up TMC drivers, so the extra
+    // delay does not affect the performance significantly.
+    uint32_t wait_counts = FIFO_LENGTH;
     delay_us(i2s_frame_us * wait_counts);
 }
 
@@ -195,6 +197,18 @@ int i2s_out_init(i2s_out_init_t* init_param) {
 
     // Route the i2s pins to the appropriate GPIO
     i2s_out_gpio_attach(init_param->ws_pin, init_param->bck_pin, init_param->data_pin);
+    if (init_param->ws_drive_strength != -1) {
+        gpio_drive_strength(init_param->ws_pin, init_param->ws_drive_strength);
+    }
+    if (init_param->ws_drive_strength != -1) {
+        gpio_drive_strength(init_param->ws_pin, init_param->ws_drive_strength);
+    }
+    if (init_param->bck_drive_strength != -1) {
+        gpio_drive_strength(init_param->bck_pin, init_param->bck_drive_strength);
+    }
+    if (init_param->data_drive_strength != -1) {
+        gpio_drive_strength(init_param->data_pin, init_param->data_drive_strength);
+    }
 
     /**
    * Each i2s transfer will take

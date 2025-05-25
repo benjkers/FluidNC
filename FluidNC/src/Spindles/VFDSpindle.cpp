@@ -111,7 +111,7 @@ namespace Spindles {
 
         bool critical = (state_is(State::Cycle) || state != SpindleState::Disable);
 
-        uint32_t dev_speed = mapSpeed(speed);
+        uint32_t dev_speed = mapSpeed(state, speed);
 
         if (_current_state != state) {
             // Changing state
@@ -210,6 +210,10 @@ namespace Spindles {
     void VFDSpindle::validate() {
         Spindle::validate();
         Assert(_uart != nullptr || _uart_num != -1, "VFD: missing UART configuration");
+    }
+
+    void VFDSpindle::afterParse() {
+        detail_->afterParse();
     }
 
     void VFDSpindle::group(Configuration::HandlerBase& handler) {

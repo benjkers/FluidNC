@@ -124,6 +124,7 @@ std::map<Message, const char*> MessageText = {
     { Message::ConfigAlarmLock, "Configuration is invalid. Check boot messages for ERR's." },
     // Handled separately due to numeric argument
     // { Message::FileQuit, "Reset during file job at line: %d" },
+    { Message::MustReboot, "Reboot FluidNC" },
 };
 
 // Prints feedback messages. This serves as a centralized method to provide additional
@@ -476,9 +477,12 @@ const char* state_name() {
 }
 
 void report_recompute_pin_string() {
-    report_pin_string = "";
-    if (config->_probe->get_state()) {
+    report_pin_string.clear();
+    if (config->_probe->probePin().get()) {
         report_pin_string += 'P';
+    }
+    if (config->_probe->toolsetterPin().get()) {
+        report_pin_string += 'T';
     }
 
     MotorMask lim_pin_state = limits_get_state();
