@@ -496,7 +496,7 @@ function onCommand(command) {
     }
     return;
   case COMMAND_BREAK_CONTROL:
-      writeBlock(mFormat.format(12))
+      writeBlock("$SD/Run=BreakDetection.nc")
     return;
   case COMMAND_TOOL_MEASURE:
     return;

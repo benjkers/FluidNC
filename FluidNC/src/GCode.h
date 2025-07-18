@@ -279,7 +279,6 @@ struct gc_modal_t {
     SpindleState  spindle;       // {M3,M4,M5}
     ToolChange    tool_change;   // {M6}
     SetToolNumber set_tool_number;
-    BreakDetection Break_Detection;
     IoControl     io_control;  // {M62, M63, M67}
     Override      override;    // {M56}
 };

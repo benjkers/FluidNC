@@ -1,7 +1,6 @@
 #pragma once
 
 #include "src/Config.h"
-
 #include "src/Configuration/Configurable.h"
 #include "src/Parameters.h"
 #include "src/Channel.h"
@@ -25,9 +24,6 @@ namespace ATCs {
 
     private:
         // config items
-        float              _safe_z           = 50.0;
-        float              _probe_seek_rate  = 200.0;
-        float              _probe_feed_rate  = 80.0;
         std::vector<float> _ets_mpos         = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
         std::vector<float> _manual_change_mpos= { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
         float              _manual_gauge     = 100.0;
@@ -56,13 +52,10 @@ namespace ATCs {
     public:
         void init() override;
         void probe_notification() override;
-        virtual bool tool_change(uint8_t value, bool pre_select, bool set_tool, bool tool_break_detection) override;
+        virtual bool tool_change(uint8_t value, bool pre_select, bool set_tool) override;
         void validate() override {}
        
         void group(Configuration::HandlerBase& handler) override {
-            handler.item("safe_z_mpos_mm", _safe_z, -100000, 100000);
-            handler.item("probe_seek_rate_mm_per_min", _probe_seek_rate, 1, 10000);
-            handler.item("probe_feed_rate_mm_per_min", _probe_feed_rate, 1, 10000);
             handler.item("ets_mpos_mm", _ets_mpos);
             handler.item("manual_gauge_mm", _manual_gauge);
             handler.item("ets_rapid_z_mpos_mm", _ets_rapid_z_mpos);

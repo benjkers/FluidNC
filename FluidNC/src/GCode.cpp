@@ -55,7 +55,6 @@ gc_modal_t modal_defaults = {
     SpindleState::Disable,
     ToolChange::Disable,
     SetToolNumber::Disable,
-    BreakDetection::Disable,
     IoControl::None,
     Override::ParkingMotion
 };
@@ -677,10 +676,6 @@ Error gc_execute_line(char* line) {
                                 break;
                         }
                         mg_word_bit = ModalGroup::MM8;
-                        break;
-                    case 12:  // M12 BreakDetection
-                        gc_block.modal.Break_Detection = BreakDetection::Enable;
-                        mg_word_bit                    = ModalGroup::MM6;
                         break;
                     case 56:
                         if (config->_enableParkingOverrideControl) {
@@ -1629,7 +1624,7 @@ Error gc_execute_line(char* line) {
                 gc_state.spindle_speed = 0.0;
             }
             log_info("Sel:" << gc_state.selected_tool << " Cur:" << gc_state.current_tool);
-            spindle->tool_change(gc_state.selected_tool, false, false,false);
+            spindle->tool_change(gc_state.selected_tool, false, false);
             if (spindle->_atc_name == "" && spindle->_m6_macro.get().empty()) {  // if neither of these exist we need to set the value here
                 gc_state.current_tool = gc_state.selected_tool;
             }
@@ -1654,7 +1649,7 @@ Error gc_execute_line(char* line) {
         if (new_spindle) {
             gc_state.spindle_speed = 0.0;
         }
-        spindle->tool_change(gc_state.selected_tool, false, true,false);
+        spindle->tool_change(gc_state.selected_tool, false, true);
         gc_state.current_tool = gc_block.values.q;
         report_ovr_counter    = 0;  // Set to report change immediately
         gc_ovr_changed();

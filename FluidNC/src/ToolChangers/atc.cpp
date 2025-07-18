@@ -10,7 +10,7 @@ ATCs::ATC* atc = nullptr;
 namespace ATCs {
     void probe_notification() {}
 
-    bool tool_change(uint8_t value, bool pre_select, bool set_tool, bool tool_break_detection) {
+    bool tool_change(uint8_t value, bool pre_select, bool set_tool) {
         return true;
     }
 }
