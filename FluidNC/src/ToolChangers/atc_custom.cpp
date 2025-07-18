@@ -59,7 +59,7 @@ namespace ATCs {
                 } 
                 else{
                     move_over_toolsetter();
-                    _macro.addf("G4P0 0.1");
+                    _macro.addf("G4P0.1");
                     _macro.addf("G43.1Z0.000");
                     _macro.addf("(MSG : Install tool #%d)", new_tool);
                 }
@@ -67,13 +67,15 @@ namespace ATCs {
                 if (was_inch_mode) {
                     _macro.addf("G20");
                 }
-                // determine tool offset for first tool.
+
+                move_to_safe_z();
                 move_over_toolsetter();
                 ets_probe(new_tool);
-                _macro.addf("#<_ets_tool_first_z>=[#5063]");  // save the value of the first tool ETS Z
-                _macro.addf("#<_my_tlo_z >=0");  // Initalizing tool length offset
-                move_to_safe_z();
-                _have_tool_setter_offset = true;           
+
+                // determine tool offset for first tool this could already be done by the probe and that is determined on the gcode file 
+                _macro.addf("$SD/Run=ProbeToolChange.nc");
+                _have_tool_setter_offset = true;
+                move_to_safe_z();            
                 _prev_tool = new_tool;
                 _macro.run(nullptr);
                 return true;
@@ -110,7 +112,7 @@ namespace ATCs {
             else if ((new_tool<=TOOL_COUNT) && !(_prev_tool<=TOOL_COUNT)){
                 move_to_safe_z();
                 move_over_toolsetter();
-                _macro.addf("G4P0 0.1");
+                _macro.addf("G4P0.1");
                 _macro.addf("(MSG: Remove tool #%d then resume to continue)", _prev_tool);
                 _macro.addf("M0");
                 pick_tool(new_tool);
@@ -120,16 +122,16 @@ namespace ATCs {
                 move_to_safe_z();
                 drop_tool(_prev_tool);
                 move_over_toolsetter();
-                _macro.addf("G4P0 0.1");
+                _macro.addf("G4P0.1");
                 _macro.addf("(MSG: Install tool #%d then resume to continue)", new_tool);
                 _macro.addf("M0");
             }
             // else both tools are manual 
             else{
                 move_to_safe_z();
-                _macro.addf("G4P0 0.1");
+                _macro.addf("G4P0.1");
                 move_over_toolsetter();
-                _macro.addf("G4P0 0.1");
+                _macro.addf("G4P0.1");
                 _macro.addf("(MSG: Install tool #%d then resume to continue)", new_tool);
                 _macro.addf("M0");
             } 
@@ -172,6 +174,8 @@ namespace ATCs {
         //_prev_tool               = gc_state.tool;  // Double check this
         _macro.addf("G4 P0.1");     
         _macro.addf("G49");                 // reset the TLO to 0
+        _macro.addf("#<_probeetsoffset>=0");
+        _macro.addf("#<_ets_tool_first_z>=0");
         _macro.addf("(MSG: TLO Z reset to 0)");
         
     }
@@ -213,8 +217,7 @@ namespace ATCs {
         feed_height=_tool_mpos[tool_index][2]+_tool_holder[2]; // move z to above tool holder height
         feed_point=_tool_mpos[tool_index][1]+_tool_holder[1]; // move z to above tool holder height
         _macro.addf("G53G0X%0.3fY%0.3f",_tool_mpos[tool_index][0],_tool_mpos[tool_index][1]); // move to tool location
-        _macro.addf("M8"); //Flood Coolent to wash chips off taper
-        _macro.addf("G4 P%0.3f",_wash_time);// wait to wash of chips    
+        _macro.addf("M8"); //Flood Coolent to wash chips off taper    
         _macro.addf("G53G0Z%0.3f",feed_height);
         _macro.addf("M62 P0"); // air on
         _macro.addf("G53G1Z%0.3fF1000",_tool_mpos[tool_index][2]); // Drop down ontop of tool
@@ -240,7 +243,7 @@ namespace ATCs {
         // do a fast probe if there is a seek that is faster than feed
         if (_probe_seek_rate > _probe_feed_rate) {
             _macro.addf("G53 G38.2 Z%0.3f F%0.3f", _ets_mpos[2], _probe_seek_rate);
-            _macro.addf("G0Z[#<_z> + 5]");  // retract befor next probe
+            _macro.addf("G53 G0 Z[#5063 + 6.5]");  // retract before next probe
         }
 
         // do the feed rate probe

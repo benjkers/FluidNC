@@ -3,7 +3,7 @@
 #include "src/Config.h"
 
 #include "src/Configuration/Configurable.h"
-
+#include "src/Parameters.h"
 #include "src/Channel.h"
 #include "src/Module.h"
 #include "atc.h"
@@ -35,7 +35,7 @@ namespace ATCs {
         std::vector<float> _tool_holder      ={ 0.0, -60, 60, 0.0, 0.0, 0.0 };
         std::vector<float> _tool_mpos[TOOL_COUNT];
         std::vector<float> _tool_gauge ={0.0, 0.0 , 0.0, 0.0, 0.0, 0.0 };
-        float              _wash_time=5;
+
 
         bool    _is_OK                   = false;
         uint8_t _prev_tool               = 0;  // TODO This could be a NV setting
@@ -78,9 +78,7 @@ namespace ATCs {
             handler.item("tool4_gauge_mm", _tool_gauge[3]);
             handler.item("tool5_gauge_mm", _tool_gauge[4]);
             handler.item("tool6_gauge_mm", _tool_gauge[5]);
-            handler.item("tool_holder_pulloff_mm", _tool_holder);
-            handler.item("wash_time_sec", _wash_time);
-           
+            handler.item("tool_holder_pulloff_mm", _tool_holder);        
         }
 
     };   
