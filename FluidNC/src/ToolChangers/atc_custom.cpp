@@ -21,11 +21,10 @@ namespace ATCs {
         _macro.erase();             // clear previous gcode
 
         
-        
-
-        if(_prev_tool=new_tool) { // no chnage to tool number return true
-            return true;
-        }
+        // Storing Gcode paramiters to be used in break detection code 
+        _macro.addf("#<_etsx>=%0.3f", _ets_mpos[0]);
+        _macro.addf("#<_etsy>=%0.3f", _ets_mpos[1]);
+        _macro.addf("#<_etsz>=%0.3f", _ets_mpos[2]);
 
         // M6T0 is used to reset this ATC and allows to probe to be used to determine the z offset 
         if (new_tool == 0) {
@@ -40,6 +39,10 @@ namespace ATCs {
             move_over_toolsetter();
             reset();
             _macro.run(nullptr);
+            return true;
+        }
+        
+        if(_prev_tool == new_tool) { // no chnage to tool number return true
             return true;
         }
        
@@ -222,10 +225,6 @@ namespace ATCs {
 
     void Custom_ATC::ets_probe(uint8_t tool_index) { 
         tool_index -= 1;
-        // Storing Gcode paramiters to be used in break detection code 
-        _macro.addf("#<_etsx>=%0.3f", _ets_mpos[0]);
-        _macro.addf("#<_etsy>=%0.3f", _ets_mpos[1]);
-
         if (tool_index<=TOOL_COUNT-1){
             float probe_height_offset=_ets_rapid_z_mpos+_tool_gauge[tool_index]; 
             _macro.addf("G53 G38.3 Z%0.3f F3500",probe_height_offset);  // rapid down
