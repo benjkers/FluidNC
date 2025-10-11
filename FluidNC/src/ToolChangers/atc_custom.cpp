@@ -175,6 +175,7 @@ namespace ATCs {
         _macro.addf("G49");                 // reset the TLO to 0
         _macro.addf("#<_probeetsoffset>=0");
         _macro.addf("#<_ets_tool_first_z>=0");
+        _macro.addf("#<_my_tlo_z >=0");
         _macro.addf("(MSG: TLO Z reset to 0)");
         
     }
