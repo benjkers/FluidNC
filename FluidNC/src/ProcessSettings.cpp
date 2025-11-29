@@ -7,26 +7,27 @@
 #include "Configuration/RuntimeSetting.h"
 #include "Configuration/AfterParse.h"
 #include "Configuration/Validator.h"
-#include "Configuration/ParseException.h"
 #include "Machine/Axes.h"
-#include "Regex.h"
+#include "Regexpr.h"
 #include "WebUI/Authentication.h"
 #include "Report.h"
 #include "MotionControl.h"
 #include "System.h"
-#include "Limits.h"               // homingAxes
+#include "Limit.h"                // homingAxes
 #include "SettingsDefinitions.h"  // build_info
 #include "Protocol.h"             // LINE_BUFFER_SIZE
-#include "UartChannel.h"          // Uart0.write()
+#include "UartChannel.h"          // UartChannel
 #include "FileStream.h"           // FileStream()
 #include "StartupLog.h"           // startupLog
 #include "Driver/gpio_dump.h"     // gpio_dump()
 #include "FileCommands.h"         // make_file_commands()
+#include "Job.h"                  // Job::active()
 
 #include "FluidPath.h"
 #include "HashFS.h"
 
 #include <cstring>
+#include <string_view>
 #include <map>
 #include <filesystem>
 
@@ -35,13 +36,11 @@
 // WA Readable as user and admin, writable as admin
 
 static Error switchInchMM(const char* value, AuthenticationLevel auth_level, Channel& out);
-
-static Error fakeMaxSpindleSpeed(const char* value, AuthenticationLevel auth_level, Channel& out);
-
 static Error report_init_message_cmd(const char* value, AuthenticationLevel auth_level, Channel& out);
 
+#ifdef ENABLE_AUTHENTICATION
 // If authentication is disabled, auth_level will be LEVEL_ADMIN
-static bool auth_failed(Word* w, const char* value, AuthenticationLevel auth_level) {
+static bool auth_failed(Word* w, std::string_view value, AuthenticationLevel auth_level) {
     permissions_t permissions = w->getPermissions();
     switch (auth_level) {
         case AuthenticationLevel::LEVEL_ADMIN:  // Admin can do anything
@@ -49,7 +48,7 @@ static bool auth_failed(Word* w, const char* value, AuthenticationLevel auth_lev
         case AuthenticationLevel::LEVEL_GUEST:  // Guest can only access open settings
             return permissions != WG;           // Anything other than RG is Guest auth fail
         case AuthenticationLevel::LEVEL_USER:   // User is complicated...
-            if (!value) {                       // User can read anything
+            if (value.empty()) {                // User can read anything
                 return false;                   // No read is a User auth fail
             }
             return permissions == WA;  // User cannot write WA
@@ -57,6 +56,11 @@ static bool auth_failed(Word* w, const char* value, AuthenticationLevel auth_lev
             return true;
     }
 }
+#else
+static bool auth_failed(Word* w, std::string_view value, AuthenticationLevel auth_level) {
+    return false;
+}
+#endif
 
 // Replace GRBL realtime characters with the corresponding URI-style
 // escape sequence.
@@ -88,37 +92,29 @@ static std::string uriEncodeGrblCharacters(const char* clear) {
 // Replace URI-style escape sequences like %HH with the character
 // corresponding to the hex number HH.  This works with any escaped
 // characters, not only those that are special to Grbl
-static char* uriDecode(const char* s) {
-    const int   dlen = 100;
-    static char decoded[dlen + 1];
-    char*       out = decoded;
-    char        c;
-    while ((c = *s++) != '\0') {
+static std::string uriDecode(std::string_view s) {
+    static std::string decoded;
+    decoded.clear();
+    char c;
+    while (!s.empty()) {
+        c = s.front();
+        s.remove_prefix(1);
         if (c == '%') {
-            if (strlen(s) < 2) {
+            if (s.length() < 2) {
                 log_error("Bad % encoding - too short");
                 goto done;
             }
-            char escstr[3];
-            escstr[0] = *s++;
-            escstr[1] = *s++;
-            escstr[2] = '\0';
-            char*   endptr;
-            uint8_t esc = strtol(escstr, &endptr, 16);
-            if (endptr != &escstr[2]) {
+            uint8_t esc;
+            if (!string_util::from_hex(s.substr(0, 2), esc)) {
                 log_error("Bad % encoding - not hex");
                 goto done;
             }
+            s.remove_prefix(2);
             c = (char)esc;
         }
-        if ((out - decoded) == dlen) {
-            log_error("String value too long");
-            goto done;
-        }
-        *out++ = c;
+        decoded += c;
     }
 done:
-    *out = '\0';
     return decoded;
 }
 
@@ -134,7 +130,7 @@ static void show_setting(const char* name, const char* value, const char* descri
 void settings_restore(uint8_t restore_flag) {
     if (restore_flag & SettingsRestore::Wifi) {
         for (Setting* s : Setting::List) {
-            if (!s->getType() == WEBSET) {
+            if (s->getType() != WEBSET) {
                 s->setDefault();
             }
         }
@@ -162,13 +158,6 @@ void settings_restore(uint8_t restore_flag) {
         report_wco_counter = 0;  // force next report to include WCO
     }
     log_info("Position offsets reset done");
-}
-
-// Get settings values from non volatile storage into memory
-static void load_settings() {
-    for (Setting* s : Setting::List) {
-        s->load();
-    }
 }
 
 extern void make_settings();
@@ -261,7 +250,7 @@ static Error toggle_check_mode(const char* value, AuthenticationLevel auth_level
     // simple and consistent.
     if (state_is(State::CheckMode)) {
         report_feedback_message(Message::Disabled);
-        sys.abort = true;
+        sys.set_abort(true);
     } else {
         if (!state_is(State::Idle)) {
             return Error::IdleError;  // Requires no alarm mode.
@@ -271,27 +260,15 @@ static Error toggle_check_mode(const char* value, AuthenticationLevel auth_level
     }
     return Error::Ok;
 }
-static Error isStuck() {
-    // Block if a control pin is stuck on
-    if (config->_control->safety_door_ajar()) {
-        send_alarm(ExecAlarm::ControlPin);
-        return Error::CheckDoor;
-    }
-    if (config->_control->stuck()) {
-        log_info("Control pins:" << config->_control->report_status());
-        send_alarm(ExecAlarm::ControlPin);
-        return Error::CheckControlPins;
-    }
-    return Error::Ok;
-}
+
 static Error disable_alarm_lock(const char* value, AuthenticationLevel auth_level, Channel& out) {
     if (state_is(State::ConfigAlarm)) {
         return Error::ConfigurationInvalid;
     }
     if (state_is(State::Alarm)) {
-        Error err = isStuck();
-        if (err != Error::Ok) {
-            return err;
+        if (config->_control->safety_door_ajar()) {
+            send_alarm(ExecAlarm::StartupPin);
+            return Error::CheckDoor;
         }
         Homing::set_all_axes_homed();
         config->_kinematics->releaseMotors(Axes::motorMask, Axes::hardLimitMask());
@@ -320,6 +297,25 @@ static Error msg_to_uart1(const char* value, AuthenticationLevel auth_level, Cha
         log_msg_to(*(config->_uart_channels[1]), value);
     }
     return Error::Ok;
+}
+static Error msg_to_channel(const char* value, AuthenticationLevel auth_level, Channel& out) {
+    if (value) {
+        std::string_view rest(value);
+        std::string_view first;
+        if (string_util::split_prefix(rest, first, ',')) {
+            auto channel = allChannels.find(first);
+            if (channel) {
+                log_msg_to(*channel, rest);
+                return Error::Ok;
+            } else {
+                log_error("Invalid channel name " << first);
+            }
+        }
+    } else {
+        log_error("Missing channel name");
+    }
+
+    return Error::InvalidValue;
 }
 static Error cmd_log_msg(const char* value, AuthenticationLevel auth_level, Channel& out) {
     if (value) {
@@ -384,12 +380,12 @@ static Error cmd_log_verbose(const char* value, AuthenticationLevel auth_level, 
 static Error home(AxisMask axisMask, Channel& out) {
     // see if blocking control switches are active
     if (config->_control->pins_block_unlock()) {
-        return Error::CheckControlPins;
+        return Error::CheckStartupPins;
     }
     if (axisMask != Machine::Homing::AllCycles) {  // if not AllCycles we need to make sure the cycle is not prohibited
         // if there is a cycle it is the axis from $H<axis>
         auto n_axis = Axes::_numberAxis;
-        for (int axis = 0; axis < n_axis; axis++) {
+        for (axis_t axis = X_AXIS; axis < n_axis; axis++) {
             if (bitnum_is_true(axisMask, axis)) {
                 auto axisConfig     = Axes::_axis[axis];
                 auto homing         = axisConfig->_homing;
@@ -426,7 +422,7 @@ static Error home_all(const char* value, AuthenticationLevel auth_level, Channel
     // value can be a list of cycle numbers like "21", which will run homing cycle 2 then cycle 1,
     // or a list of axis names like "XZ", which will home the X and Z axes simultaneously
     if (value) {
-        int        ndigits  = 0;
+        uint8_t    ndigits  = 0;
         const auto lenValue = strlen(value);
         for (int i = 0; i < lenValue; i++) {
             char cycleName = value[i];
@@ -480,15 +476,22 @@ static Error home_b(const char* value, AuthenticationLevel auth_level, Channel& 
 static Error home_c(const char* value, AuthenticationLevel auth_level, Channel& out) {
     return home(bitnum_to_mask(C_AXIS), out);
 }
+static Error home_u(const char* value, AuthenticationLevel auth_level, Channel& out) {
+    return home(bitnum_to_mask(U_AXIS), out);
+}
+static Error home_v(const char* value, AuthenticationLevel auth_level, Channel& out) {
+    return home(bitnum_to_mask(V_AXIS), out);
+}
+static Error home_w(const char* value, AuthenticationLevel auth_level, Channel& out) {
+    return home(bitnum_to_mask(W_AXIS), out);
+}
 static std::string limit_set(uint32_t mask) {
-    const char* motor0AxisName = "xyzabc";
     std::string s;
-    for (int axis = 0; axis < MAX_N_AXIS; axis++) {
-        s += bitnum_is_true(mask, Machine::Axes::motor_bit(axis, 0)) ? char(motor0AxisName[axis]) : ' ';
+    for (axis_t axis = X_AXIS; axis < MAX_N_AXIS; axis++) {
+        s += bitnum_is_true(mask, Machine::Axes::motor_bit(axis, 0)) ? ::tolower(Machine::Axes::axisName(axis)[0]) : ' ';
     }
-    const char* motor1AxisName = "XYZABC";
-    for (int axis = 0; axis < MAX_N_AXIS; axis++) {
-        s += bitnum_is_true(mask, Machine::Axes::motor_bit(axis, 1)) ? char(motor1AxisName[axis]) : ' ';
+    for (axis_t axis = X_AXIS; axis < MAX_N_AXIS; axis++) {
+        s += bitnum_is_true(mask, Machine::Axes::motor_bit(axis, 1)) ? toupper(Machine::Axes::axisName(axis)[0]) : ' ';
     }
     return s;
 }
@@ -547,7 +550,7 @@ static Error restore_settings(const char* value, AuthenticationLevel auth_level,
 
 static Error showState(const char* value, AuthenticationLevel auth_level, Channel& out) {
     const char* name;
-    const State state = sys.state;
+    const State state = sys.state();
     auto        it    = StateName.find(state);
     name              = it == StateName.end() ? "<invalid>" : it->second;
 
@@ -577,12 +580,11 @@ static Error listAlarms(const char* value, AuthenticationLevel auth_level, Chann
     if (state_is(State::ConfigAlarm)) {
         log_string(out, "Configuration alarm is active. Check the boot messages for 'ERR'.");
     } else if (state_is(State::Alarm)) {
-        log_stream(out, "Active alarm: " << int(lastAlarm) << " (" << alarmString(lastAlarm));
+        log_stream(out, "Active alarm: " << int(lastAlarm) << " (" << alarmString(lastAlarm) << ")");
     }
     if (value) {
-        char*   endptr      = NULL;
-        uint8_t alarmNumber = uint8_t(strtol(value, &endptr, 10));
-        if (*endptr) {
+        uint32_t alarmNumber;
+        if (!string_util::from_decimal(value, alarmNumber)) {
             log_stream(out, "Malformed alarm number: " << value);
             return Error::InvalidValue;
         }
@@ -609,9 +611,8 @@ const char* errorString(Error errorNumber) {
 
 static Error listErrors(const char* value, AuthenticationLevel auth_level, Channel& out) {
     if (value) {
-        char* endptr      = NULL;
-        int   errorNumber = strtol(value, &endptr, 10);
-        if (*endptr) {
+        uint32_t errorNumber;
+        if (!string_util::from_decimal(value, errorNumber)) {
             log_stream(out, "Malformed error number: " << value);
             return Error::InvalidValue;
         }
@@ -652,14 +653,12 @@ static Error motor_control(const char* value, bool disable) {
         return Error::InvalidStatement;
     }
 
-    for (int i = 0; i < Axes::_numberAxis; i++) {
-        char axisName = axes->axisName(i);
-
-        if (strchr(value, axisName) || strchr(value, tolower(axisName))) {
-            log_info((disable ? "Dis" : "En") << "abling " << axisName << " motors");
-            axes->set_disable(i, disable);
-        }
+    axis_t axis = Machine::Axes::axisNum(value);
+    if (axis == INVALID_AXIS) {
+        return Error::InvalidValue;
     }
+    log_info((disable ? "Dis" : "En") << "abling " << value << " motors");
+    axes->set_disable(axis, disable);
     return Error::Ok;
 }
 static Error motor_disable(const char* value, AuthenticationLevel auth_level, Channel& out) {
@@ -744,9 +743,9 @@ static Error showGPIOs(const char* value, AuthenticationLevel auth_level, Channe
 #include "UartTypes.h"
 
 static Error uartPassthrough(const char* value, AuthenticationLevel auth_level, Channel& out) {
-    int         timeout = 2000;
+    uint32_t    timeout = 2000;
     std::string uart_name("auto");
-    int         uart_num;
+    objnum_t    uart_num;
 
     if (value) {
         std::string_view rest(value);
@@ -754,9 +753,9 @@ static Error uartPassthrough(const char* value, AuthenticationLevel auth_level, 
         while (string_util::split_prefix(rest, first, ',')) {
             if (string_util::equal_ignore_case(first, "auto")) {
                 uart_name = "auto";
-            } else if (!first.empty() && string_util::tolower(first.back()) == 's') {
+            } else if (!first.empty() && ::tolower(first.back()) == 's') {
                 first.remove_suffix(1);
-                if (!string_util::is_int(first, timeout)) {
+                if (!string_util::from_decimal(first, timeout)) {
                     log_error_to(out, "Invalid timeout number");
                     return Error::InvalidValue;
                 }
@@ -812,10 +811,6 @@ static Error uartPassthrough(const char* value, AuthenticationLevel auth_level, 
         channel = nullptr;  // Leave channel null if not found
     }
 
-    bool flow;
-    int  xon_threshold;
-    int  xoff_threshold;
-
     if (channel) {
         channel->pause();
     }
@@ -823,8 +818,6 @@ static Error uartPassthrough(const char* value, AuthenticationLevel auth_level, 
 
     const int buflen = 256;
     uint8_t   buffer[buflen];
-    size_t    upstream_len;
-    size_t    downstream_len;
 
     TickType_t last_ticks = xTaskGetTickCount();
 
@@ -850,6 +843,71 @@ static Error uartPassthrough(const char* value, AuthenticationLevel auth_level, 
     return Error::Ok;
 }
 
+std::map<std::string, Pin*> pins;
+
+static Error setGPIOInput(const char* value, AuthenticationLevel auth_level, Channel& out) {
+    if (pins.find(value) == pins.end()) {
+        Pin* thePin = new Pin(Pin::create(value));
+        pins[value] = thePin;
+    }
+
+    pins[value]->setAttr(Pin::Attr::Input);
+    log_info("Pin " << value << " set to input");
+
+    return Error::Ok;
+}
+
+static Error setGPIOOutput(const char* value, AuthenticationLevel auth_level, Channel& out) {
+    if (pins.find(value) == pins.end()) {
+        Pin* thePin = new Pin(Pin::create(value));
+        pins[value] = thePin;
+    }
+
+    pins[value]->setAttr(Pin::Attr::Output);
+    log_info("Pin " << value << " set to output");
+
+    return Error::Ok;
+}
+
+static Error readGPIO(const char* value, AuthenticationLevel auth_level, Channel& out) {
+    if (pins.find(value) == pins.end()) {
+        Pin* thePin = new Pin(Pin::create(value));
+        pins[value] = thePin;
+        thePin->setAttr(Pin::Attr::Input);
+    }
+
+    const auto v = pins[value]->read() ? "on" : "off";
+    log_info("Pin " << value << " reads " << v);
+
+    return Error::Ok;
+}
+
+static Error writeGPIOOn(const char* value, AuthenticationLevel auth_level, Channel& out) {
+    if (pins.find(value) == pins.end()) {
+        Pin* thePin = new Pin(Pin::create(value));
+        pins[value] = thePin;
+        thePin->setAttr(Pin::Attr::Output);
+    }
+
+    pins[value]->synchronousWrite(true);
+    log_info("Pin " << value << " is on");
+
+    return Error::Ok;
+}
+
+static Error writeGPIOOff(const char* value, AuthenticationLevel auth_level, Channel& out) {
+    if (pins.find(value) == pins.end()) {
+        Pin* thePin = new Pin(Pin::create(value));
+        pins[value] = thePin;
+        thePin->setAttr(Pin::Attr::Output);
+    }
+
+    pins[value]->synchronousWrite(0);
+    log_info("Pin " << value << " is off");
+
+    return Error::Ok;
+}
+
 static Error setReportInterval(const char* value, AuthenticationLevel auth_level, Channel& out) {
     if (!value) {
         uint32_t actual = out.getReportInterval();
@@ -860,10 +918,9 @@ static Error setReportInterval(const char* value, AuthenticationLevel auth_level
         }
         return Error::Ok;
     }
-    char*    endptr;
-    uint32_t intValue = strtol(value, &endptr, 10);
+    uint32_t intValue;
 
-    if (endptr == value || *endptr != '\0') {
+    if (!string_util::from_decimal(value, intValue)) {
         return Error::BadNumberFormat;
     }
 
@@ -882,7 +939,7 @@ static Error setReportInterval(const char* value, AuthenticationLevel auth_level
 }
 
 static Error sendAlarm(const char* value, AuthenticationLevel auth_level, Channel& out) {
-    int       intValue = value ? atoi(value) : 0;
+    int32_t   intValue = value ? atoi(value) : 0;
     ExecAlarm alarm    = static_cast<ExecAlarm>(intValue);
     log_debug("Sending alarm " << intValue << " " << alarmString(alarm));
     send_alarm(alarm);
@@ -901,6 +958,11 @@ static Error showHeap(const char* value, AuthenticationLevel auth_level, Channel
 // for decoding its own value string, if it needs one.
 void make_user_commands() {
     new UserCommand("GD", "GPIO/Dump", showGPIOs, anyState);
+    new UserCommand("GI", "GPIO/Input", setGPIOInput, anyState);
+    new UserCommand("GO", "GPIO/Output", setGPIOOutput, anyState);
+    new UserCommand("G+", "GPIO/On", writeGPIOOn, anyState);
+    new UserCommand("G-", "GPIO/Off", writeGPIOOff, anyState);
+    new UserCommand("GR", "GPIO/Read", readGPIO, anyState);
 
     new UserCommand("CI", "Channel/Info", showChannelInfo, anyState);
     new UserCommand("CD", "Config/Dump", dump_config, anyState);
@@ -933,18 +995,22 @@ void make_user_commands() {
     new UserCommand("HA", "Home/A", home_a, allowConfigStates);
     new UserCommand("HB", "Home/B", home_b, allowConfigStates);
     new UserCommand("HC", "Home/C", home_c, allowConfigStates);
+    new UserCommand("HU", "Home/U", home_u, allowConfigStates);
+    new UserCommand("HV", "Home/V", home_v, allowConfigStates);
+    new UserCommand("HW", "Home/W", home_w, allowConfigStates);
 
     new UserCommand("MU0", "Msg/Uart0", msg_to_uart0, anyState);
     new UserCommand("MU1", "Msg/Uart1", msg_to_uart1, anyState);
+    new UserCommand("MC", "Msg/Channel", msg_to_channel, anyState);
     new UserCommand("LM", "Log/Msg", cmd_log_msg, anyState);
     new UserCommand("LE", "Log/Error", cmd_log_error, anyState);
     new UserCommand("LW", "Log/Warn", cmd_log_warn, anyState);
     new UserCommand("LI", "Log/Info", cmd_log_info, anyState);
     new UserCommand("LD", "Log/Debug", cmd_log_debug, anyState);
-    new UserCommand("LV  ", "Log/Verbose", cmd_log_verbose, anyState);
+    new UserCommand("LV", "Log/Verbose", cmd_log_verbose, anyState);
 
     new UserCommand("SLP", "System/Sleep", go_to_sleep, notIdleOrAlarm);
-    new UserCommand("I", "Build/Info", get_report_build_info, notIdleOrAlarm);
+    new UserCommand("I", "Build/Info", get_report_build_info, allowConfigStates);
     new UserCommand("RST", "Settings/Restore", restore_settings, notIdleOrAlarm, WA);
 
     new UserCommand("SA", "Alarm/Send", sendAlarm, anyState);
@@ -962,42 +1028,10 @@ void make_user_commands() {
     new AsyncUserCommand("G", "GCode/Modes", report_gcode, anyState);
 };
 
-// normalize_key puts a key string into canonical form -
-// without whitespace.
-// start points to a null-terminated string.
-// Returns the first substring that does not contain whitespace.
-// Case is unchanged because comparisons are case-insensitive.
-char* normalize_key(char* start) {
-    char c;
-
-    // In the usual case, this loop will exit on the very first test,
-    // because the first character is likely to be non-white.
-    // Null ('\0') is not considered to be a space character.
-    while (isspace(c = *start) && c != '\0') {
-        ++start;
-    }
-
-    // start now points to either a printable character or end of string
-    if (c == '\0') {
-        return start;
-    }
-
-    // Having found the beginning of the printable string,
-    // we now scan forward until we find a space character.
-    char* end;
-    for (end = start; (c = *end) != '\0' && !isspace(c); end++) {}
-
-    // end now points to either a whitespace character or end of string
-    // In either case it is okay to place a null there
-    *end = '\0';
-
-    return start;
-}
-
 // This is the handler for all forms of settings commands,
 // $..= and [..], with and without a value.
-Error do_command_or_setting(const char* key, const char* value, AuthenticationLevel auth_level, Channel& out) {
-    // If value is NULL, it means that there was no value string, i.e.
+Error do_command_or_setting(std::string_view key, std::string_view value, AuthenticationLevel auth_level, Channel& out) {
+    // If value is empty, it means that there was no value string, i.e.
     // $key without =, or [key] with nothing following.
     // If value is not NULL, but the string is empty, that is the form
     // $key= with nothing following the = .
@@ -1006,14 +1040,19 @@ Error do_command_or_setting(const char* key, const char* value, AuthenticationLe
     // you cannot determine whether to set or display solely based on
     // the presence of a value.
     for (Command* cp : Command::List) {
-        if ((strcasecmp(cp->getName(), key) == 0) || (cp->getGrblName() && strcasecmp(cp->getGrblName(), key) == 0)) {
+        bool usedGrblName = cp->getGrblName() && string_util::equal_ignore_case(cp->getGrblName(), key);
+        if (usedGrblName || string_util::equal_ignore_case(cp->getName(), key)) {
             if (auth_failed(cp, value, auth_level)) {
                 return Error::AuthenticationFailed;
             }
             if (cp->synchronous()) {
                 protocol_buffer_synchronize();
             }
-            return cp->action(value, auth_level, out);
+            if (value.empty()) {
+                return cp->action(nullptr, auth_level, out);
+            }
+            std::string s(value);
+            return cp->action(s.c_str(), auth_level, out);
         }
     }
 
@@ -1024,7 +1063,7 @@ Error do_command_or_setting(const char* key, const char* value, AuthenticationLe
         config->group(rts);
 
         if (rts.isHandled_) {
-            if (value) {
+            if (!value.empty()) {
                 // Validate only if something changed, not for display
                 try {
                     Configuration::Validator validator;
@@ -1041,10 +1080,7 @@ Error do_command_or_setting(const char* key, const char* value, AuthenticationLe
             }
             return Error::Ok;
         }
-    } catch (const Configuration::ParseException& ex) {
-        log_error("Configuration parse error at line " << ex.LineNumber() << ": " << ex.What());
-        return Error::ConfigurationInvalid;
-    } catch (const AssertionFailed& ex) {
+    } catch (std::exception& ex) {
         log_error("Configuration change failed: " << ex.what());
         return Error::ConfigurationInvalid;
     }
@@ -1052,32 +1088,34 @@ Error do_command_or_setting(const char* key, const char* value, AuthenticationLe
     // Next search the settings list by text name. If found, set a new
     // value if one is given, otherwise display the current value
     for (Setting* s : Setting::List) {
-        if (strcasecmp(s->getName(), key) == 0) {
+        if (string_util::equal_ignore_case(s->getName(), key)) {
+#if 0
             if (auth_failed(s, value, auth_level)) {
                 return Error::AuthenticationFailed;
             }
-            if (value) {
-                return s->setStringValue(uriDecode(value));
-            } else {
+#endif
+            if (value.empty()) {
                 show_setting(s->getName(), s->getStringValue(), NULL, out);
                 return Error::Ok;
             }
+            return s->setStringValue(uriDecode(value));
         }
     }
 
     // Then search the setting list by compatible name.  If found, set a new
     // value if one is given, otherwise display the current value in compatible mode
     for (Setting* s : Setting::List) {
-        if (s->getGrblName() && strcasecmp(s->getGrblName(), key) == 0) {
+        if (s->getGrblName() && string_util::equal_ignore_case(s->getGrblName(), key)) {
+#if 0
             if (auth_failed(s, value, auth_level)) {
                 return Error::AuthenticationFailed;
             }
-            if (value) {
-                return s->setStringValue(uriDecode(value));
-            } else {
+#endif
+            if (value.empty()) {
                 show_setting(s->getGrblName(), s->getCompatibleValue(), NULL, out);
                 return Error::Ok;
             }
+            return s->setStringValue(uriDecode(value));
         }
     }
 
@@ -1085,8 +1123,7 @@ Error do_command_or_setting(const char* key, const char* value, AuthenticationLe
     // indicating a display operation, we allow partial matches
     // and display every possibility.  This only applies to the
     // text form of the name, not to the nnn and ESPnnn forms.
-    Error retval = Error::InvalidStatement;
-    if (!value) {
+    if (value.empty()) {
         bool found = false;
         for (Setting* s : Setting::List) {
             auto test = s->getName();
@@ -1095,7 +1132,12 @@ Error do_command_or_setting(const char* key, const char* value, AuthenticationLe
             // consumes a lot of FLASH.  The extra capability is rarely useful
             // especially now that there are only a few NVS settings.
             if (regexMatch(key, test, false)) {
-                const char* displayValue = auth_failed(s, value, auth_level) ? "<Authentication required>" : s->getStringValue();
+                const char* displayValue = s->getStringValue();
+#if 0
+                if (auth_failed(s, value, auth_level)) {
+                    displayValue = "<Authentication required>";
+                }
+#endif
                 show_setting(test, displayValue, NULL, out);
                 found = true;
             }
@@ -1107,32 +1149,12 @@ Error do_command_or_setting(const char* key, const char* value, AuthenticationLe
     return Error::InvalidStatement;
 }
 
-Error settings_execute_line(char* line, Channel& out, AuthenticationLevel auth_level) {
-    remove_password(line, auth_level);
+Error settings_execute_line(const char* line, Channel& out, AuthenticationLevel auth_level) {
+    std::string_view key(line + 1);
+    std::string_view value;
 
-    char* value;
-    if (*line++ == '[') {  // [ESPxxx] form
-        value = strchr(line, ']');
-        if (!value) {
-            // Missing ] is an error in this form
-            return Error::InvalidStatement;
-        }
-        // ']' was found; replace it with null and set value to the rest of the line.
-        *value++ = '\0';
-        // If the rest of the line is empty, replace value with NULL.
-        if (*value == '\0') {
-            value = NULL;
-        }
-    } else {
-        // $xxx form
-        value = strchr(line, '=');
-        if (value) {
-            // $xxx=yyy form.
-            *value++ = '\0';
-        }
-    }
-
-    char* key = normalize_key(line);
+    string_util::split(key, value, *line == '[' ? ']' : '=');
+    key = string_util::trim(key);
 
     // At this point there are three possibilities for value
     // NULL - $xxx without =
@@ -1142,7 +1164,7 @@ Error settings_execute_line(char* line, Channel& out, AuthenticationLevel auth_l
     return do_command_or_setting(key, value, auth_level, out);
 }
 
-Error execute_line(char* line, Channel& channel, AuthenticationLevel auth_level) {
+Error execute_line(const char* line, Channel& channel, AuthenticationLevel auth_level) {
     // Empty or comment line. For syncing purposes.
     if (line[0] == 0) {
         return Error::Ok;
@@ -1156,6 +1178,7 @@ Error execute_line(char* line, Channel& channel, AuthenticationLevel auth_level)
         if (gc_state.skip_blocks) {
             return Error::Ok;
         }
+
         return settings_execute_line(line, channel, auth_level);
     }
     // Everything else is gcode. Block if in alarm or jog mode.
@@ -1164,7 +1187,10 @@ Error execute_line(char* line, Channel& channel, AuthenticationLevel auth_level)
     }
     Error result = gc_execute_line(line);
     if (result != Error::Ok && result != Error::Reset) {
-        log_debug_to(channel, "Bad GCode: " << line);
+        log_error_to(channel, "Bad GCode: " << line);
+        if (Job::active()) {
+            send_alarm(ExecAlarm::GCodeError);
+        }
     }
     return result;
 }

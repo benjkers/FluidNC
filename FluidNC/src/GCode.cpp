@@ -60,13 +60,10 @@ gc_modal_t modal_defaults = {
 };
 // clang-format on
 
-#define FAIL(status) return (status);
-
 void gc_init() {
     // Reset parser state:
-    auto save_tlo = gc_state.tool_length_offset;  // we want TLO to persist until reboot.
+
     memset(&gc_state, 0, sizeof(parser_state_t));
-    gc_state.tool_length_offset = save_tlo;
 
     // Load default G54 coordinate system.
     gc_state.modal          = modal_defaults;
@@ -79,13 +76,13 @@ void gc_init() {
 // Sets g-code parser position in mm. Input in steps. Called by the system abort and hard
 // limit pull-off routines.
 void gc_sync_position() {
-    motor_steps_to_mpos(gc_state.position, get_motor_steps());
+    steps_to_mpos(gc_state.position, get_steps());
 }
 
 static bool decode_format_string(const char* comment, size_t& index, size_t len, const char*& format) {
     // comment[index] is '%'
     const char* f   = comment + index;
-    int         rem = len - index;
+    size_t      rem = len - index;
     if (rem > 1 && f[1] == 'd') {
         ++index;
         format = "%.0f";
@@ -107,7 +104,7 @@ static bool decode_format_string(const char* comment, size_t& index, size_t len,
     return false;
 }
 
-static void gcode_comment_msg(char* comment) {
+static void gcode_comment_msg(const char* comment) {
     char   msg[128];
     size_t offset = strlen("MSG_");
     size_t index;
@@ -147,16 +144,16 @@ static void gcode_comment_msg(char* comment) {
     }
 }
 
-static std::optional<WaitOnInputMode> validate_wait_on_input_mode_value(uint8_t);
-static Error                          gc_wait_on_input(bool is_digital, uint8_t input_number, WaitOnInputMode mode, float timeout);
+static std::optional<WaitOnInputMode> validate_wait_on_input_mode_value(objnum_t);
+static Error                          gc_wait_on_input(bool is_digital, objnum_t input_number, WaitOnInputMode mode, float timeout);
 
 // Edit GCode line in-place, removing whitespace and comments and
 // converting to uppercase
 void collapseGCode(char* line) {
     // parenPtr, if non-NULL, is the address of the character after (
-    char* parenPtr = NULL;
+    const char* parenPtr = NULL;
     // outPtr is the address where newly-processed characters will be placed.
-    // outPtr is alway less than or equal to inPtr.
+    // outPtr is always less than or equal to inPtr.
     char* outPtr = line;
     char  c;
     for (char* inPtr = line; (c = *inPtr) != '\0'; inPtr++) {
@@ -238,7 +235,13 @@ void gc_wco_changed() {
 // In this function, all units and positions are converted and
 // exported to internal functions in terms of (mm, mm/min) and absolute machine
 // coordinates, respectively.
-Error gc_execute_line(char* line) {
+Error gc_execute_line(const char* input_line) {
+    char line[128];
+    if (strlen(input_line) > 127) {
+        return Error::LineLengthExceeded;
+    }
+    strcpy(line, input_line);
+
     // Step 0 - remove whitespace and comments and convert to upper case
     collapseGCode(line);
 
@@ -251,17 +254,16 @@ Error gc_execute_line(char* line) {
     memset(&gc_block, 0, sizeof(parser_block_t));                  // Initialize the parser block struct.
     memcpy(&gc_block.modal, &gc_state.modal, sizeof(gc_modal_t));  // Copy current modes
     AxisCommand axis_command = AxisCommand::None;
-    size_t      axis_0, axis_1, axis_linear;
+    axis_t      axis_0, axis_1, axis_linear;
     CoordIndex  coord_select = CoordIndex::G54;  // Tracks G10 P coordinate selection for execution
     // Initialize bitflag tracking variables for axis indices compatible operations.
-    size_t axis_words = 0;  // XYZ tracking
-    size_t ijk_words  = 0;  // IJK tracking
+    AxisMask axis_words = 0;  // XYZ tracking
+    size_t   ijk_words  = 0;  // IJK tracking
     // Initialize command and value words and parser flags variables.
     uint32_t command_words = 0;  // Tracks G and M command words. Also used for modal group violations.
     uint32_t value_words   = 0;  // Tracks value words.
 
     bool jogMotion            = false;
-    bool checkMantissa        = false;
     bool clockwiseArc         = false;
     bool probeExplicit        = false;
     bool probeAway            = false;
@@ -307,7 +309,7 @@ Error gc_execute_line(char* line) {
             }
             pos++;
             if (!assign_param(line, pos)) {
-                FAIL(Error::BadNumberFormat);
+                return Error::BadNumberFormat;
             }
             continue;
         }
@@ -319,11 +321,11 @@ Error gc_execute_line(char* line) {
 
         // Import the next g-code word, expecting a letter followed by a value. Otherwise, error out.
         if ((letter < 'A') || (letter > 'Z')) {
-            FAIL(Error::ExpectedCommandLetter);  // [Expected word letter]
+            return Error::ExpectedCommandLetter;  // [Expected word letter]
         }
         pos++;
         if (!read_number(line, pos, value)) {
-            FAIL(Error::BadNumberFormat);  // [Expected word value]
+            return Error::BadNumberFormat;  // [Expected word value]
         }
         if (gc_state.skip_blocks && letter != 'O') {
             return Error::Ok;
@@ -352,7 +354,7 @@ Error gc_execute_line(char* line) {
                         gc_block.non_modal_command = NonModal::SetCoordinateData;
                         if (mantissa == 0) {
                             if (axis_command != AxisCommand::None) {
-                                FAIL(Error::GcodeAxisCommandConflict);  // [Axis word/command conflict]
+                                return Error::GcodeAxisCommandConflict;  // [Axis word/command conflict]
                             }
                             axis_command = AxisCommand::NonModal;
                         }
@@ -373,7 +375,7 @@ Error gc_execute_line(char* line) {
                         switch (mantissa) {
                             case 0:  // Ignore G28.1, G30.1, and G92.1
                                 if (axis_command != AxisCommand::None) {
-                                    FAIL(Error::GcodeAxisCommandConflict);  // [Axis word/command conflict]
+                                    return Error::GcodeAxisCommandConflict;  // [Axis word/command conflict]
                                 }
                                 axis_command = AxisCommand::NonModal;
                                 break;
@@ -381,10 +383,8 @@ Error gc_execute_line(char* line) {
                                 mantissa = 0;  // Set to zero to indicate valid non-integer G command.
                                 break;
                             default:
-                                log_info("M4 requires laser mode or a reversable spindle");
-                                FAIL(Error::GcodeUnsupportedCommand);
-                                // not reached
-                                break;
+                                log_info("M4 requires laser mode or a reversible spindle");
+                                return Error::GcodeUnsupportedCommand;
                         }
                         mg_word_bit = ModalGroup::MG0;
                         break;
@@ -422,12 +422,12 @@ Error gc_execute_line(char* line) {
                         //only allow G38 "Probe" commands if a probe pin is defined.
                         if (!config->_probe->exists()) {
                             log_info("No probe pin defined");
-                            FAIL(Error::GcodeUnsupportedCommand);  // [Unsupported G command]
+                            return Error::GcodeUnsupportedCommand;  // [Unsupported G command]
                         }
                         // Check for G0/1/2/3/38 being called with G10/28/30/92 on same block.
                         // * G43.1 is also an axis command but is not explicitly defined this way.
                         if (axis_command != AxisCommand::None) {
-                            FAIL(Error::GcodeAxisCommandConflict);  // [Axis word/command conflict]
+                            return Error::GcodeAxisCommandConflict;  // [Axis word/command conflict]
                         }
 
                         // Indicate that the block contains an explicit G38.n word.  This lets us
@@ -456,8 +456,8 @@ Error gc_execute_line(char* line) {
                                 gc_block.modal.motion = Motion::ProbeAwayNoError;
                                 break;
                             default:
-                                FAIL(Error::GcodeUnsupportedCommand);
-                                break;  // [Unsupported G38.x command]
+                                // [Unsupported G38.x command]
+                                return Error::GcodeUnsupportedCommand;
                         }
                         mantissa    = 0;  // Set to zero to indicate valid non-integer G command.
                         mg_word_bit = ModalGroup::MG1;
@@ -486,13 +486,12 @@ Error gc_execute_line(char* line) {
                                 mg_word_bit             = ModalGroup::MG3;
                                 break;
                             case 10:
-                                FAIL(Error::GcodeUnsupportedCommand);  // [G90.1 not supported]
+                                return Error::GcodeUnsupportedCommand;  // [G90.1 not supported]
                                 // mg_word_bit = ModalGroup::MG4;
                                 // gc_block.modal.distance_arc = ArcDistance::Absolute;
                                 break;
                             default:
-                                FAIL(Error::GcodeUnsupportedCommand);
-                                break;
+                                return Error::GcodeUnsupportedCommand;
                         }
                         break;
                     case 91:
@@ -508,8 +507,7 @@ Error gc_execute_line(char* line) {
                                 mg_word_bit = ModalGroup::MG4;
                                 break;
                             default:
-                                FAIL(Error::GcodeUnsupportedCommand);
-                                break;
+                                return Error::GcodeUnsupportedCommand;
                         }
                         break;
                     case 93:
@@ -540,7 +538,7 @@ Error gc_execute_line(char* line) {
                         // there cannot be any axis motion or coordinate offsets updated. Meaning G43, G43.1, and G49
                         // all are explicit axis commands, regardless if they require axis words or not.
                         if (axis_command != AxisCommand::None) {
-                            FAIL(Error::GcodeAxisCommandConflict);
+                            return Error::GcodeAxisCommandConflict;
                         }
                         // [Axis word/command conflict] }
                         axis_command = AxisCommand::ToolLengthOffset;
@@ -549,7 +547,7 @@ Error gc_execute_line(char* line) {
                         } else if (mantissa == 10) {  // G43.1
                             gc_block.modal.tool_length = ToolLengthOffset::EnableDynamic;
                         } else {
-                            FAIL(Error::GcodeUnsupportedCommand);  // [Unsupported G43.x command]
+                            return Error::GcodeUnsupportedCommand;  // [Unsupported G43.x command]
                         }
                         mantissa    = 0;  // Set to zero to indicate valid non-integer G command.
                         mg_word_bit = ModalGroup::MG8;
@@ -575,35 +573,48 @@ Error gc_execute_line(char* line) {
                         mg_word_bit                 = ModalGroup::MG12;
                         break;
                     case 59:
-                        gc_block.modal.coord_select = CoordIndex::G59;
-                        mg_word_bit                 = ModalGroup::MG12;
+                        switch (mantissa) {
+                            case 0:
+                                gc_block.modal.coord_select = CoordIndex::G59;
+                                break;
+                            case 10:
+                                gc_block.modal.coord_select = CoordIndex::G59_1;
+                                break;
+                            case 20:
+                                gc_block.modal.coord_select = CoordIndex::G59_2;
+                                break;
+                            case 30:
+                                gc_block.modal.coord_select = CoordIndex::G59_3;
+                                break;
+                        }
+                        mg_word_bit = ModalGroup::MG12;
                         break;
                         // NOTE: G59.x are not supported.
                     case 61:
                         if (mantissa != 0) {
-                            FAIL(Error::GcodeUnsupportedCommand);  // [G61.1 not supported]
+                            return Error::GcodeUnsupportedCommand;  // [G61.1 not supported]
                         }
                         // gc_block.modal.control = ControlMode::ExactPath; // G61
                         mg_word_bit = ModalGroup::MG13;
                         break;
                     default:
-                        FAIL(Error::GcodeUnsupportedCommand);  // [Unsupported G command]
+                        return Error::GcodeUnsupportedCommand;  // [Unsupported G command]
                 }
                 if (mantissa > 0) {
-                    FAIL(Error::GcodeCommandValueNotInteger);  // [Unsupported or invalid Gxx.x command]
+                    return Error::GcodeCommandValueNotInteger;  // [Unsupported or invalid Gxx.x command]
                 }
                 // Check for more than one command per modal group violations in the current block
                 // NOTE: Variable 'mg_word_bit' is always assigned, if the command is valid.
                 bitmask = bitnum_to_mask(mg_word_bit);
                 if (bits_are_true(command_words, bitmask)) {
-                    FAIL(Error::GcodeModalGroupViolation);
+                    return Error::GcodeModalGroupViolation;
                 }
                 command_words |= bitmask;
                 break;
             case 'M':
                 // Determine 'M' command and its modal group
                 if (mantissa > 0 && !(int_value == 7 || int_value == 8)) {
-                    FAIL(Error::GcodeCommandValueNotInteger);  // [No Mxx.x commands]
+                    return Error::GcodeCommandValueNotInteger;  // [No Mxx.x commands]
                 }
                 switch (int_value) {
                     case 0:
@@ -636,7 +647,7 @@ Error gc_execute_line(char* line) {
                                 if (spindle->is_reversable || spindle->isRateAdjusted()) {
                                     gc_block.modal.spindle = SpindleState::Ccw;
                                 } else {
-                                    FAIL(Error::GcodeUnsupportedCommand);
+                                    return Error::GcodeUnsupportedCommand;
                                 }
                                 break;
                             case 5:
@@ -655,7 +666,7 @@ Error gc_execute_line(char* line) {
                         switch (int_value) {
                             case 7:
                                 if (mantissa && mantissa != 10) {
-                                    FAIL(Error::GcodeUnsupportedCommand);  // M7 and M7.1 are supported
+                                    return Error::GcodeUnsupportedCommand;  // M7 and M7.1 are supported
                                 }
                                 if (config->_coolant->hasMist()) {
                                     gc_block.coolant = GCodeCoolant::M7;
@@ -663,7 +674,7 @@ Error gc_execute_line(char* line) {
                                 break;
                             case 8:
                                 if (mantissa && mantissa != 10) {
-                                    FAIL(Error::GcodeUnsupportedCommand);  // M8 and M8.1 are supported
+                                    return Error::GcodeUnsupportedCommand;  // M8 and M8.1 are supported
                                 }
                                 if (config->_coolant->hasFlood()) {
                                     gc_block.coolant = GCodeCoolant::M8;
@@ -682,7 +693,7 @@ Error gc_execute_line(char* line) {
                             gc_block.modal.override = Override::ParkingMotion;
                             mg_word_bit             = ModalGroup::MM9;
                         } else {
-                            FAIL(Error::GcodeUnsupportedCommand);  // [Unsupported M command]
+                            return Error::GcodeUnsupportedCommand;  // [Unsupported M command]
                         }
                         break;
                     case 61:  // M61 set tool number
@@ -718,13 +729,13 @@ Error gc_execute_line(char* line) {
                         mg_word_bit               = ModalGroup::MM5;
                         break;
                     default:
-                        FAIL(Error::GcodeUnsupportedCommand);  // [Unsupported M command]
+                        return Error::GcodeUnsupportedCommand;  // [Unsupported M command]
                 }
                 // Check for more than one command per modal group violations in the current block
                 // NOTE: Variable 'mg_word_bit' is always assigned, if the command is valid.
                 bitmask = bitnum_to_mask(mg_word_bit);
                 if (bits_are_true(command_words, bitmask)) {
-                    FAIL(Error::GcodeModalGroupViolation);
+                    return Error::GcodeModalGroupViolation;
                 }
                 command_words |= bitmask;
                 break;
@@ -741,7 +752,7 @@ Error gc_execute_line(char* line) {
                             gc_block.values.xyz[A_AXIS] = value;
                             set_bitnum(axis_words, A_AXIS);
                         } else {
-                            FAIL(Error::GcodeUnsupportedCommand);
+                            return Error::GcodeUnsupportedCommand;
                         }
                         break;
                     case 'B':
@@ -750,7 +761,7 @@ Error gc_execute_line(char* line) {
                             gc_block.values.xyz[B_AXIS] = value;
                             set_bitnum(axis_words, B_AXIS);
                         } else {
-                            FAIL(Error::GcodeUnsupportedCommand);
+                            return Error::GcodeUnsupportedCommand;
                         }
                         break;
                     case 'C':
@@ -759,7 +770,7 @@ Error gc_execute_line(char* line) {
                             gc_block.values.xyz[C_AXIS] = value;
                             set_bitnum(axis_words, C_AXIS);
                         } else {
-                            FAIL(Error::GcodeUnsupportedCommand);
+                            return Error::GcodeUnsupportedCommand;
                         }
                         break;
 
@@ -801,7 +812,7 @@ Error gc_execute_line(char* line) {
                         break;
                     case 'O':
                         if (mantissa > 0) {
-                            FAIL(Error::GcodeCommandValueNotInteger);
+                            return Error::GcodeCommandValueNotInteger;
                         }
                         axis_word_bit     = GCodeWord::O;
                         gc_block.values.o = int_value;
@@ -826,9 +837,36 @@ Error gc_execute_line(char* line) {
                     case 'T':
                         axis_word_bit = GCodeWord::T;
                         if (value > MaxToolNumber) {
-                            FAIL(Error::GcodeMaxValueExceeded);
+                            return Error::GcodeMaxValueExceeded;
                         }
                         gc_state.selected_tool = int_value;
+                        break;
+                    case 'U':
+                        if (n_axis > U_AXIS) {
+                            axis_word_bit               = GCodeWord::U;
+                            gc_block.values.xyz[U_AXIS] = value;
+                            set_bitnum(axis_words, U_AXIS);
+                        } else {
+                            return Error::GcodeUnsupportedCommand;
+                        }
+                        break;
+                    case 'V':
+                        if (n_axis > V_AXIS) {
+                            axis_word_bit               = GCodeWord::V;
+                            gc_block.values.xyz[V_AXIS] = value;
+                            set_bitnum(axis_words, V_AXIS);
+                        } else {
+                            return Error::GcodeUnsupportedCommand;
+                        }
+                        break;
+                    case 'W':
+                        if (n_axis > W_AXIS) {
+                            axis_word_bit               = GCodeWord::W;
+                            gc_block.values.xyz[W_AXIS] = value;
+                            set_bitnum(axis_words, W_AXIS);
+                        } else {
+                            return Error::GcodeUnsupportedCommand;
+                        }
                         break;
                     case 'X':
                         if (n_axis > X_AXIS) {
@@ -837,7 +875,7 @@ Error gc_execute_line(char* line) {
                             set_bitnum(axis_words, X_AXIS);
 
                         } else {
-                            FAIL(Error::GcodeUnsupportedCommand);
+                            return Error::GcodeUnsupportedCommand;
                         }
                         break;
                     case 'Y':
@@ -846,7 +884,7 @@ Error gc_execute_line(char* line) {
                             gc_block.values.xyz[Y_AXIS] = value;
                             set_bitnum(axis_words, Y_AXIS);
                         } else {
-                            FAIL(Error::GcodeUnsupportedCommand);
+                            return Error::GcodeUnsupportedCommand;
                         }
                         break;
                     case 'Z':
@@ -855,23 +893,23 @@ Error gc_execute_line(char* line) {
                             gc_block.values.xyz[Z_AXIS] = value;
                             set_bitnum(axis_words, Z_AXIS);
                         } else {
-                            FAIL(Error::GcodeUnsupportedCommand);
+                            return Error::GcodeUnsupportedCommand;
                         }
                         break;
                     default:
-                        FAIL(Error::GcodeUnsupportedCommand);
+                        return Error::GcodeUnsupportedCommand;
                 }
                 // NOTE: Variable 'axis_word_bit' is always assigned, if the non-command letter is valid.
                 uint32_t bitmask = bitnum_to_mask(axis_word_bit);
                 if (bits_are_true(value_words, bitmask)) {
-                    FAIL(Error::GcodeWordRepeated);  // [Word repeated]
+                    return Error::GcodeWordRepeated;  // [Word repeated]
                 }
                 // Check for invalid negative values for words F, N, P, T, and S.
                 // NOTE: Negative value check is done here simply for code-efficiency.
                 if (bitmask & (bitnum_to_mask(GCodeWord::F) | bitnum_to_mask(GCodeWord::N) | bitnum_to_mask(GCodeWord::P) |
                                bitnum_to_mask(GCodeWord::T) | bitnum_to_mask(GCodeWord::S))) {
                     if (value < 0.0) {
-                        FAIL(Error::NegativeValue);  // [Word value cannot be negative]
+                        return Error::NegativeValue;  // [Word value cannot be negative]
                     }
                 }
                 value_words |= bitmask;  // Flag to indicate parameter assigned.
@@ -914,7 +952,7 @@ Error gc_execute_line(char* line) {
     if (bitnum_is_true(value_words, GCodeWord::N)) {
         // Line number value cannot be less than zero (done) or greater than max line number.
         if (gc_block.values.n > MaxLineNumber) {
-            FAIL(Error::GcodeInvalidLineNumber);  // [Exceeds max line number]
+            return Error::GcodeInvalidLineNumber;  // [Exceeds max line number]
         }
     }
     // clear_bitnum(value_words, GCodeWord::N); // NOTE: Single-meaning value word. Set at end of error-checking.
@@ -930,7 +968,7 @@ Error gc_execute_line(char* line) {
     // NOTE: For jogging, ignore prior feed rate mode. Enforce G94 and check for required F word.
     if (jogMotion) {
         if (bitnum_is_false(value_words, GCodeWord::F)) {
-            FAIL(Error::GcodeUndefinedFeedRate);
+            return Error::GcodeUndefinedFeedRate;
         }
         if (!nonmodalG38 && gc_block.modal.units == Units::Inches) {
             gc_block.values.f *= MM_PER_INCH;
@@ -941,7 +979,7 @@ Error gc_execute_line(char* line) {
             if (axis_command == AxisCommand::MotionMode) {
                 if ((gc_block.modal.motion != Motion::None) && (gc_block.modal.motion != Motion::Seek)) {
                     if (bitnum_is_false(value_words, GCodeWord::F)) {
-                        FAIL(Error::GcodeUndefinedFeedRate);  // [F word missing]
+                        return Error::GcodeUndefinedFeedRate;  // [F word missing]
                     }
                 }
             }
@@ -995,20 +1033,20 @@ Error gc_execute_line(char* line) {
     // [10. Dwell ]: P value missing. P is negative (done.) NOTE: See below.
     if (gc_block.non_modal_command == NonModal::Dwell) {
         if (bitnum_is_false(value_words, GCodeWord::P)) {
-            FAIL(Error::GcodeValueWordMissing);  // [P word missing]
+            return Error::GcodeValueWordMissing;  // [P word missing]
         }
         clear_bitnum(value_words, GCodeWord::P);
     }
     if ((gc_block.modal.io_control == IoControl::DigitalOnSync) || (gc_block.modal.io_control == IoControl::DigitalOffSync) ||
         (gc_block.modal.io_control == IoControl::DigitalOnImmediate) || (gc_block.modal.io_control == IoControl::DigitalOffImmediate)) {
         if (bitnum_is_false(value_words, GCodeWord::P)) {
-            FAIL(Error::GcodeValueWordMissing);  // [P word missing]
+            return Error::GcodeValueWordMissing;  // [P word missing]
         }
         clear_bitnum(value_words, GCodeWord::P);
     }
     if ((gc_block.modal.io_control == IoControl::SetAnalogSync) || (gc_block.modal.io_control == IoControl::SetAnalogImmediate)) {
         if (bitnum_is_false(value_words, GCodeWord::E) || bitnum_is_false(value_words, GCodeWord::Q)) {
-            FAIL(Error::GcodeValueWordMissing);
+            return Error::GcodeValueWordMissing;
         }
         clear_bitnum(value_words, GCodeWord::E);
         clear_bitnum(value_words, GCodeWord::Q);
@@ -1019,26 +1057,26 @@ Error gc_execute_line(char* line) {
         // Exactly one of P or E must be present
         if (bitnum_is_false(value_words, GCodeWord::P) && bitnum_is_false(value_words, GCodeWord::E)) {
             // need at least one of P or E
-            FAIL(Error::GcodeValueWordMissing);
+            return Error::GcodeValueWordMissing;
         }
         if (bitnum_is_true(value_words, GCodeWord::P) && bitnum_is_true(value_words, GCodeWord::E)) {
             // need at most one of P or E
-            FAIL(Error::GcodeValueWordInvalid);
+            return Error::GcodeValueWordInvalid;
         }
         isWaitOnInputDigital = bitnum_is_true(value_words, GCodeWord::P);
         clear_bitnum(value_words, GCodeWord::P);
         clear_bitnum(value_words, GCodeWord::E);
         if (bitnum_is_false(value_words, GCodeWord::L)) {
-            FAIL(Error::GcodeValueWordMissing);
+            return Error::GcodeValueWordMissing;
         }
         clear_bitnum(value_words, GCodeWord::L);
         auto const wait_mode = validate_wait_on_input_mode_value(gc_block.values.l);
         if (!wait_mode) {
-            FAIL(Error::GcodeValueWordInvalid);
+            return Error::GcodeValueWordInvalid;
         }
         // Only Immediate mode is valid for analog input
         if (!isWaitOnInputDigital && wait_mode != WaitOnInputMode::Immediate) {
-            FAIL(Error::GcodeValueWordInvalid);
+            return Error::GcodeValueWordInvalid;
         }
         // Q is the timeout in seconds (conditionally optional)
         //  - Ignored if L is 0 (Immediate).
@@ -1047,20 +1085,20 @@ Error gc_execute_line(char* line) {
             if (gc_block.values.q != 0.0) {
                 if (wait_mode != WaitOnInputMode::Immediate) {
                     // Non-immediate waits must have a non-zero timeout
-                    FAIL(Error::GcodeValueWordInvalid);
+                    return Error::GcodeValueWordInvalid;
                 }
             }
         } else {
             if (wait_mode != WaitOnInputMode::Immediate) {
                 // Non-immediate waits must have a timeout
-                FAIL(Error::GcodeValueWordMissing);
+                return Error::GcodeValueWordMissing;
             }
         }
         clear_bitnum(value_words, GCodeWord::Q);
     }
     if (gc_block.modal.set_tool_number == SetToolNumber::Enable) {
         if (bitnum_is_false(value_words, GCodeWord::Q)) {
-            FAIL(Error::GcodeValueWordMissing);
+            return Error::GcodeValueWordMissing;
         }
         clear_bitnum(value_words, GCodeWord::Q);
     }
@@ -1084,11 +1122,11 @@ Error gc_execute_line(char* line) {
     }
 
     // [12. Set length units ]: N/A
-    // Pre-convert XYZ coordinate values to millimeters, if applicable.
+    // Pre-convert XYZ and UVW coordinate values to millimeters, if applicable.
     if (!nonmodalG38 && gc_block.modal.units == Units::Inches) {
-        for (size_t idx = 0; idx < n_axis; idx++) {  // Axes indices are consistent, so loop may be used.
-            if ((idx < A_AXIS || idx > C_AXIS) && bitnum_is_true(axis_words, idx)) {
-                gc_block.values.xyz[idx] *= MM_PER_INCH;
+        for (axis_t axis = X_AXIS; axis < n_axis; axis++) {  // Axes indices are consistent, so loop may be used.
+            if (is_linear(axis) && bitnum_is_true(axis_words, axis)) {
+                gc_block.values.xyz[axis] *= MM_PER_INCH;
             }
         }
     }
@@ -1105,9 +1143,7 @@ Error gc_execute_line(char* line) {
     if (axis_command == AxisCommand::ToolLengthOffset) {  // Indicates called in block.
         gc_ngc_changed(CoordIndex::TLO);
         if (gc_block.modal.tool_length == ToolLengthOffset::EnableDynamic) {
-            if (axis_words ^ bitnum_to_mask(TOOL_LENGTH_OFFSET_AXIS)) {
-                FAIL(Error::GcodeG43DynamicAxisError);
-            }
+            gc_ngc_changed(CoordIndex::TLO);
         }
     }
     // [15. Coordinate system selection ]: *N/A. Error, if cutter radius comp is active.
@@ -1121,7 +1157,7 @@ Error gc_execute_line(char* line) {
         // This error probably cannot happen because preceding code sets
         // gc_block.modal.coord_select only to specific supported values
         if (gc_block.modal.coord_select >= CoordIndex::NWCSystems) {
-            FAIL(Error::GcodeUnsupportedCoordSys);  // [Greater than N sys]
+            return Error::GcodeUnsupportedCoordSys;  // [Greater than N sys]
         }
         if (gc_state.modal.coord_select != gc_block.modal.coord_select) {
             coords[gc_block.modal.coord_select]->get(block_coord_system);
@@ -1141,18 +1177,18 @@ Error gc_execute_line(char* line) {
             // [G10 L2 Errors]: R word NOT SUPPORTED. P value not 0 to nCoordSys(max 9). Axis words missing.
             // [G10 L20 Errors]: P must be 0 to nCoordSys(max 9). Axis words missing.
             if (!axis_words) {
-                FAIL(Error::GcodeNoAxisWords)
+                return Error::GcodeNoAxisWords;
             };  // [No axis words]
             if (bits_are_false(value_words, (bitnum_to_mask(GCodeWord::P) | bitnum_to_mask(GCodeWord::L)))) {
-                FAIL(Error::GcodeValueWordMissing);  // [P/L word missing]
+                return Error::GcodeValueWordMissing;  // [P/L word missing]
             }
             if (gc_block.values.l != 20) {
                 if (gc_block.values.l == 2) {
                     if (bitnum_is_true(value_words, GCodeWord::R)) {
-                        FAIL(Error::GcodeUnsupportedCommand);  // [G10 L2 R not supported]
+                        return Error::GcodeUnsupportedCommand;  // [G10 L2 R not supported]
                     }
                 } else {
-                    FAIL(Error::GcodeUnsupportedCommand);  // [Unsupported L]
+                    return Error::GcodeUnsupportedCommand;  // [Unsupported L]
                 }
             }
             // Select the coordinate system based on the P word
@@ -1165,25 +1201,23 @@ Error gc_execute_line(char* line) {
                 coord_select = gc_block.modal.coord_select;
             }
             if (coord_select >= CoordIndex::NWCSystems) {
-                FAIL(Error::GcodeUnsupportedCoordSys);  // [Greater than N sys]
+                return Error::GcodeUnsupportedCoordSys;  // [Greater than N sys]
             }
             clear_bits(value_words, (bitnum_to_mask(GCodeWord::L) | bitnum_to_mask(GCodeWord::P)));
             coords[coord_select]->get(coord_data);
 
             // Pre-calculate the coordinate data changes.
-            for (size_t idx = 0; idx < n_axis; idx++) {  // Axes indices are consistent, so loop may be used.
+            for (axis_t axis = X_AXIS; axis < n_axis; axis++) {  // Axes indices are consistent, so loop may be used.
                 // Update axes defined only in block. Always in machine coordinates. Can change non-active system.
-                if (bitnum_is_true(axis_words, idx)) {
+                if (bitnum_is_true(axis_words, axis)) {
                     if (gc_block.values.l == 20) {
                         // L20: Update coordinate system axis at current position (with modifiers) with programmed value
                         // WPos = MPos - WCS - G92 - TLO  ->  WCS = MPos - G92 - TLO - WPos
-                        coord_data[idx] = gc_state.position[idx] - gc_state.coord_offset[idx] - gc_block.values.xyz[idx];
-                        if (idx == TOOL_LENGTH_OFFSET_AXIS) {
-                            coord_data[idx] -= gc_state.tool_length_offset;
-                        }
+                        coord_data[axis] = gc_state.position[axis] - gc_state.coord_offset[axis] - gc_block.values.xyz[axis];
+                        coord_data[axis] -= gc_state.tool_length_offset[axis];
                     } else {
                         // L2: Update coordinate system axis to programmed value.
-                        coord_data[idx] = gc_block.values.xyz[idx];
+                        coord_data[axis] = gc_block.values.xyz[axis];
                     }
                 }  // Else, keep current stored value.
             }
@@ -1192,19 +1226,17 @@ Error gc_execute_line(char* line) {
         case NonModal::SetCoordinateOffset:
             // [G92 Errors]: No axis words.
             if (!axis_words) {
-                FAIL(Error::GcodeNoAxisWords);  // [No axis words]
+                return Error::GcodeNoAxisWords;  // [No axis words]
             }
             // Update axes defined only in block. Offsets current system to defined value. Does not update when
             // active coordinate system is selected, but is still active unless G92.1 disables it.
-            for (size_t idx = 0; idx < n_axis; idx++) {  // Axes indices are consistent, so loop may be used.
-                if (bitnum_is_true(axis_words, idx)) {
+            for (axis_t axis = X_AXIS; axis < n_axis; axis++) {  // Axes indices are consistent, so loop may be used.
+                if (bitnum_is_true(axis_words, axis)) {
                     // WPos = MPos - WCS - G92 - TLO  ->  G92 = MPos - WCS - TLO - WPos
-                    gc_block.values.xyz[idx] = gc_state.position[idx] - block_coord_system[idx] - gc_block.values.xyz[idx];
-                    if (idx == TOOL_LENGTH_OFFSET_AXIS) {
-                        gc_block.values.xyz[idx] -= gc_state.tool_length_offset;
-                    }
+                    gc_block.values.xyz[axis] = gc_state.position[axis] - block_coord_system[axis] - gc_block.values.xyz[axis];
+                    gc_block.values.xyz[axis] -= gc_state.tool_length_offset[axis];
                 } else {
-                    gc_block.values.xyz[idx] = gc_state.coord_offset[idx];
+                    gc_block.values.xyz[axis] = gc_state.coord_offset[axis];
                 }
             }
             gc_ngc_changed(CoordIndex::G92);
@@ -1216,21 +1248,19 @@ Error gc_execute_line(char* line) {
             // NOTE: Tool offsets may be appended to these conversions when/if this feature is added.
             if (axis_command != AxisCommand::ToolLengthOffset) {  // TLO block any axis command.
                 if (axis_words) {
-                    for (size_t idx = 0; idx < n_axis; idx++) {  // Axes indices are consistent, so loop may be used to save flash space.
-                        if (bitnum_is_false(axis_words, idx)) {
-                            gc_block.values.xyz[idx] = gc_state.position[idx];  // No axis word in block. Keep same axis position.
+                    for (axis_t axis = X_AXIS; axis < n_axis; axis++) {  // Axes indices are consistent, so loop may be used to save flash space.
+                        if (bitnum_is_false(axis_words, axis)) {
+                            gc_block.values.xyz[axis] = gc_state.position[axis];  // No axis word in block. Keep same axis position.
                         } else {
                             // Update specified value according to distance mode or ignore if absolute override is active.
                             // NOTE: G53 is never active with G28/30 since they are in the same modal group.
                             if (gc_block.non_modal_command != NonModal::AbsoluteOverride) {
                                 // Apply coordinate offsets based on distance mode.
                                 if (!nonmodalG38 && gc_block.modal.distance == Distance::Absolute) {
-                                    gc_block.values.xyz[idx] += block_coord_system[idx] + gc_state.coord_offset[idx];
-                                    if (idx == TOOL_LENGTH_OFFSET_AXIS) {
-                                        gc_block.values.xyz[idx] += gc_state.tool_length_offset;
-                                    }
+                                    gc_block.values.xyz[axis] += block_coord_system[axis] + gc_state.coord_offset[axis];
+                                    gc_block.values.xyz[axis] += gc_state.tool_length_offset[axis];
                                 } else {  // Incremental mode
-                                    gc_block.values.xyz[idx] += gc_state.position[idx];
+                                    gc_block.values.xyz[axis] += gc_state.position[axis];
                                 }
                             }
                         }
@@ -1250,9 +1280,9 @@ Error gc_execute_line(char* line) {
                     }
                     if (axis_words) {
                         // Move only the axes specified in secondary move.
-                        for (size_t idx = 0; idx < n_axis; idx++) {
-                            if (!(axis_words & bitnum_to_mask(idx))) {
-                                coord_data[idx] = gc_state.position[idx];
+                        for (axis_t axis = X_AXIS; axis < n_axis; axis++) {
+                            if (!(axis_words & bitnum_to_mask(axis))) {
+                                coord_data[axis] = gc_state.position[axis];
                             }
                         }
                     } else {
@@ -1271,7 +1301,7 @@ Error gc_execute_line(char* line) {
                     // [G53 Errors]: G0 and G1 are not active. Cutter compensation is enabled.
                     // NOTE: All explicit axis word commands are in this modal group. So no implicit check necessary.
                     if (!(probeExplicit || gc_block.modal.motion == Motion::Seek || gc_block.modal.motion == Motion::Linear)) {
-                        FAIL(Error::GcodeG53InvalidMotionMode);  // [G53 G0/1 not active]
+                        return Error::GcodeG53InvalidMotionMode;  // [G53 G0/1 not active]
                     }
                     break;
                 default:
@@ -1283,7 +1313,7 @@ Error gc_execute_line(char* line) {
         // [G80 Errors]: Axis word are programmed while G80 is active.
         // NOTE: Even non-modal commands or TLO that use axis words will throw this strict error.
         if (axis_words) {
-            FAIL(Error::GcodeAxisWordsExist);  // [No axis words allowed]
+            return Error::GcodeAxisWordsExist;  // [No axis words allowed]
         }
         // Check remaining motion modes, if axis word are implicit (exist and not used by G10/28/30/92), or
         // was explicitly commanded in the g-code block.
@@ -1299,7 +1329,7 @@ Error gc_execute_line(char* line) {
         } else {
             // Check if feed rate is defined for the motion modes that require it.
             if (gc_block.values.f == 0.0) {
-                FAIL(Error::GcodeUndefinedFeedRate);  // [Feed rate undefined]
+                return Error::GcodeUndefinedFeedRate;  // [Feed rate undefined]
             }
             switch (gc_block.modal.motion) {
                 case Motion::None:
@@ -1315,6 +1345,7 @@ Error gc_execute_line(char* line) {
                     break;
                 case Motion::CwArc:
                     clockwiseArc = true;  // No break intentional.
+                    [[fallthrough]];
                 case Motion::CcwArc:
                     // [G2/3 Errors All-Modes]: Feed rate undefined.
                     // [G2/3 Radius-Mode Errors]: No axis words in selected plane. Target point is same as current.
@@ -1323,13 +1354,13 @@ Error gc_execute_line(char* line) {
                     // [G2/3 Full-Circle-Mode Errors]: NOT SUPPORTED. Axis words exist. No offsets programmed. P must be an integer.
                     // NOTE: Both radius and offsets are required for arc tracing and are pre-computed with the error-checking.
                     if (!axis_words) {
-                        FAIL(Error::GcodeNoAxisWords);  // [No axis words]
+                        return Error::GcodeNoAxisWords;  // [No axis words]
                     }
                     if (!(axis_words & (bitnum_to_mask(axis_0) | bitnum_to_mask(axis_1)))) {
-                        FAIL(Error::GcodeNoAxisWordsInPlane);  // [No axis words in plane]
+                        return Error::GcodeNoAxisWordsInPlane;  // [No axis words in plane]
                     }
                     if (gc_block.values.p != truncf(gc_block.values.p) || gc_block.values.p < 0.0) {
-                        FAIL(Error::GcodeCommandValueNotInteger);  // [P word is not an integer]
+                        return Error::GcodeCommandValueNotInteger;  // [P word is not an integer]
                     }
 
                     // Calculate the change in position along each selected axis
@@ -1339,7 +1370,7 @@ Error gc_execute_line(char* line) {
                     if (value_words & bitnum_to_mask(GCodeWord::R)) {             // Arc Radius Mode
                         clear_bits(value_words, bitnum_to_mask(GCodeWord::R));
                         if (isequal_position_vector(gc_state.position, gc_block.values.xyz)) {
-                            FAIL(Error::GcodeInvalidTarget);  // [Invalid target]
+                            return Error::GcodeInvalidTarget;  // [Invalid target]
                         }
                         // Convert radius value to proper units.
                         if (!nonmodalG38 && gc_block.modal.units == Units::Inches) {
@@ -1396,7 +1427,7 @@ Error gc_execute_line(char* line) {
                         // than d. If so, the sqrt of a negative number is complex and error out.
                         float h_x2_div_d = 4.0f * gc_block.values.r * gc_block.values.r - x * x - y * y;
                         if (h_x2_div_d < 0) {
-                            FAIL(Error::GcodeArcRadiusError);  // [Arc radius error]
+                            return Error::GcodeArcRadiusError;  // [Arc radius error]
                         }
                         // Finish computing h_x2_div_d.
                         h_x2_div_d = -sqrt(h_x2_div_d) / hypot_f(x, y);  // == -(h * 2 / d)
@@ -1432,14 +1463,15 @@ Error gc_execute_line(char* line) {
                         gc_block.values.ijk[axis_1] = 0.5f * (y + (x * h_x2_div_d));
                     } else {  // Arc Center Format Offset Mode
                         if (!(ijk_words & (bitnum_to_mask(axis_0) | bitnum_to_mask(axis_1)))) {
-                            FAIL(Error::GcodeNoOffsetsInPlane);  // [No offsets in plane]
+                            return Error::GcodeNoOffsetsInPlane;  // [No offsets in plane]
                         }
                         clear_bits(value_words, (bitnum_to_mask(GCodeWord::I) | bitnum_to_mask(GCodeWord::J) | bitnum_to_mask(GCodeWord::K)));
                         // Convert IJK values to proper units.
                         if (!nonmodalG38 && gc_block.modal.units == Units::Inches) {
-                            for (size_t idx = 0; idx < n_axis; idx++) {  // Axes indices are consistent, so loop may be used to save flash space.
-                                if (ijk_words & bitnum_to_mask(idx)) {
-                                    gc_block.values.ijk[idx] *= MM_PER_INCH;
+                            for (axis_t axis = X_AXIS; axis < n_axis;
+                                 axis++) {  // Axes indices are consistent, so loop may be used to save flash space.
+                                if (ijk_words & bitnum_to_mask(axis)) {
+                                    gc_block.values.ijk[axis] *= MM_PER_INCH;
                                 }
                             }
                         }
@@ -1453,10 +1485,10 @@ Error gc_execute_line(char* line) {
                         float delta_r = fabsf(target_r - gc_block.values.r);
                         if (delta_r > 0.005) {
                             if (delta_r > 0.5) {
-                                FAIL(Error::GcodeInvalidTarget);  // [Arc definition error] > 0.5mm
+                                return Error::GcodeInvalidTarget;  // [Arc definition error] > 0.5mm
                             }
                             if (delta_r > (0.001 * gc_block.values.r)) {
-                                FAIL(Error::GcodeInvalidTarget);  // [Arc definition error] > 0.005mm AND 0.1% radius
+                                return Error::GcodeInvalidTarget;  // [Arc definition error] > 0.005mm AND 0.1% radius
                             }
                         }
                     }
@@ -1465,6 +1497,7 @@ Error gc_execute_line(char* line) {
                 case Motion::ProbeTowardNoError:
                 case Motion::ProbeAwayNoError:
                     probeNoError = true;  // No break intentional.
+                    [[fallthrough]];
                 case Motion::ProbeToward:
                 case Motion::ProbeAway:
                     if ((gc_block.modal.motion == Motion::ProbeAway) || (gc_block.modal.motion == Motion::ProbeAwayNoError)) {
@@ -1476,7 +1509,7 @@ Error gc_execute_line(char* line) {
                     //   allow the planner buffer to empty and move off the probe trigger before another probing cycle.
                     if (bitnum_is_true(value_words, GCodeWord::P)) {
                         if (multiple_bits_set(axis_words)) {  // There should only be one axis word given
-                            FAIL(Error::GcodeUnusedWords);    // we have more axis words than allowed.
+                            return Error::GcodeUnusedWords;   // we have more axis words than allowed.
                         }
                     } else {
                         gc_block.values.p = __FLT_MAX__;  // This is a hack to signal the probe cycle that not to auto offset.
@@ -1484,10 +1517,10 @@ Error gc_execute_line(char* line) {
                     clear_bitnum(value_words, GCodeWord::P);  // allow P to be used
 
                     if (!axis_words) {
-                        FAIL(Error::GcodeNoAxisWords);  // [No axis words]
+                        return Error::GcodeNoAxisWords;  // [No axis words]
                     }
                     if (isequal_position_vector(gc_state.position, gc_block.values.xyz)) {
-                        FAIL(Error::GcodeInvalidTarget);  // [Invalid target]
+                        return Error::GcodeInvalidTarget;  // [Invalid target]
                     }
                     break;
             }
@@ -1507,11 +1540,12 @@ Error gc_execute_line(char* line) {
     if (axis_command != AxisCommand::None) {
         clear_bits(value_words,
                    (bitnum_to_mask(GCodeWord::X) | bitnum_to_mask(GCodeWord::Y) | bitnum_to_mask(GCodeWord::Z) |
-                    bitnum_to_mask(GCodeWord::A) | bitnum_to_mask(GCodeWord::B) | bitnum_to_mask(GCodeWord::C)));  // Remove axis words.
+                    bitnum_to_mask(GCodeWord::A) | bitnum_to_mask(GCodeWord::B) | bitnum_to_mask(GCodeWord::C)) |
+                       bitnum_to_mask(GCodeWord::U) | bitnum_to_mask(GCodeWord::V) | bitnum_to_mask(GCodeWord::W));  // Remove axis words.
     }
     clear_bits(value_words, (bitnum_to_mask(GCodeWord::D) | bitnum_to_mask(GCodeWord::O)));
     if (value_words) {
-        FAIL(Error::GcodeUnusedWords);  // [Unused words]
+        return Error::GcodeUnusedWords;  // [Unused words]
     }
     /* -------------------------------------------------------------------------------------
        STEP 4: EXECUTE!!
@@ -1530,10 +1564,10 @@ Error gc_execute_line(char* line) {
         // Only distance and unit modal commands and G53 absolute override command are allowed.
         // NOTE: Feed rate word and axis word checks have already been performed in STEP 3.
         if (command_words & ~(bitnum_to_mask(ModalGroup::MG3) | bitnum_to_mask(ModalGroup::MG6) | bitnum_to_mask(ModalGroup::MG0))) {
-            FAIL(Error::InvalidJogCommand)
+            return Error::InvalidJogCommand;
         };
         if (!(gc_block.non_modal_command == NonModal::AbsoluteOverride || gc_block.non_modal_command == NonModal::NoAction)) {
-            FAIL(Error::InvalidJogCommand);
+            return Error::InvalidJogCommand;
         }
         // Initialize planner data to current spindle and coolant modal state.
         pl_data->spindle_speed  = gc_state.spindle_speed;
@@ -1634,7 +1668,7 @@ Error gc_execute_line(char* line) {
     }
     if (gc_block.modal.set_tool_number == SetToolNumber::Enable) {  // M61
         if (gc_block.values.q < 0) {
-            FAIL(Error::NegativeValue);  // https://linuxcnc.org/docs/2.8/html/gcode/m-code.html#mcode:m61
+            return Error::NegativeValue;  // https://linuxcnc.org/docs/2.8/html/gcode/m-code.html#mcode:m61
         }
         gc_state.selected_tool = gc_block.values.q;
         bool stopped_spindle   = false;  // was spindle stopped via the change
@@ -1706,10 +1740,10 @@ Error gc_execute_line(char* line) {
             }
             bool turnOn = gc_block.modal.io_control == IoControl::DigitalOnSync || gc_block.modal.io_control == IoControl::DigitalOnImmediate;
             if (!config->_userOutputs->setDigital((int)gc_block.values.p, turnOn)) {
-                FAIL(Error::PParamMaxExceeded);
+                return Error::PParamMaxExceeded;
             }
         } else {
-            FAIL(Error::PParamMaxExceeded);
+            return Error::PParamMaxExceeded;
         }
     }
     if ((gc_block.modal.io_control == IoControl::SetAnalogSync) || (gc_block.modal.io_control == IoControl::SetAnalogImmediate)) {
@@ -1723,14 +1757,14 @@ Error gc_execute_line(char* line) {
                 protocol_buffer_synchronize();
             }
             if (!config->_userOutputs->setAnalogPercent((int)gc_block.values.e, gc_block.values.q)) {
-                FAIL(Error::PParamMaxExceeded);
+                return Error::PParamMaxExceeded;
             }
         } else {
-            FAIL(Error::PParamMaxExceeded);
+            return Error::PParamMaxExceeded;
         }
     }
     if (gc_block.modal.io_control == IoControl::WaitOnInput) {
-        auto const validate_input_number = [&](const float input_number) -> std::optional<uint8_t> {
+        auto const validate_input_number = [&](const float input_number) -> std::optional<objnum_t> {
             if (input_number < 0) {
                 return std::nullopt;
             }
@@ -1741,11 +1775,11 @@ Error gc_execute_line(char* line) {
                     return std::nullopt;
                 }
             }
-            return (uint8_t)input_number;
+            return (objnum_t)input_number;
         };
         auto const maybe_input_number = validate_input_number(isWaitOnInputDigital ? gc_block.values.p : gc_block.values.e);
         if (!maybe_input_number.has_value()) {
-            FAIL(Error::PParamMaxExceeded);
+            return Error::PParamMaxExceeded;
         }
         auto const input_number = *maybe_input_number;
         auto const wait_mode    = *validate_wait_on_input_mode_value(gc_block.values.l);
@@ -1777,13 +1811,18 @@ Error gc_execute_line(char* line) {
     // axis of the block XYZ value array.
     if (axis_command == AxisCommand::ToolLengthOffset) {  // Indicates a change.
         gc_state.modal.tool_length = gc_block.modal.tool_length;
-        if (gc_state.modal.tool_length == ToolLengthOffset::Cancel) {  // G49
-            gc_block.values.xyz[TOOL_LENGTH_OFFSET_AXIS] = 0.0;
-        }
         // else G43.1
-        if (gc_state.tool_length_offset != gc_block.values.xyz[TOOL_LENGTH_OFFSET_AXIS]) {
-            gc_state.tool_length_offset = gc_block.values.xyz[TOOL_LENGTH_OFFSET_AXIS];
+        for (size_t idx = 0; idx < n_axis; idx++) {  // Axes indices are consistent, so loop may be used to save flash space.
+            if (gc_state.modal.tool_length == ToolLengthOffset::Cancel) {
+                gc_state.tool_length_offset[idx] = 0.0;
+            } else {
+                if (bitnum_is_true(axis_words, idx)) {
+                    gc_state.tool_length_offset[idx] = gc_block.values.xyz[idx];
+                }
+            }
         }
+
+        coords[CoordIndex::TLO]->set(gc_state.tool_length_offset);
     }
     // [15. Coordinate system selection ]:
     if (gc_state.modal.coord_select != gc_block.modal.coord_select) {
@@ -1872,7 +1911,7 @@ Error gc_execute_line(char* line) {
             // As far as the parser is concerned, the position is now == target. In reality the
             // motion control system might still be processing the action and the real tool position
             // in any intermediate location.
-            if (sys.abort) {
+            if (sys.abort()) {
                 return Error::Reset;
             }
             if (gc_update_pos == GCUpdatePos::Target) {
@@ -1929,9 +1968,9 @@ Error gc_execute_line(char* line) {
 
             // gc_state.modal.override = OVERRIDE_DISABLE; // Not supported.
             if (RESTORE_OVERRIDES_AFTER_PROGRAM_END) {
-                sys.f_override        = FeedOverride::Default;
-                sys.r_override        = RapidOverride::Default;
-                sys.spindle_speed_ovr = SpindleSpeedOverride::Default;
+                sys.set_f_override(FeedOverride::Default);
+                sys.set_r_override(RapidOverride::Default);
+                sys.set_spindle_speed_ovr(SpindleSpeedOverride::Default);
             }
 
             // Execute coordinate change and spindle/coolant stop.
@@ -1950,42 +1989,6 @@ Error gc_execute_line(char* line) {
     return perform_assignments() ? Error::Ok : Error::ParameterAssignmentFailed;
 
     // TODO: % to denote start of program.
-}
-
-//void grbl_msg_sendf(uint8_t client, MsgLevel level, const char* format, ...);
-void gc_exec_linef(bool sync_after, Channel& out, const char* format, ...) {
-    if (sys.state != State::Idle && sys.state != State::Cycle) {
-        throw std::runtime_error("Invalid atate");
-    }
-
-    char    loc_buf[100];
-    char*   temp = loc_buf;
-    va_list arg;
-    va_list copy;
-    va_start(arg, format);
-    va_copy(copy, arg);
-    size_t len = vsnprintf(NULL, 0, format, arg);
-    va_end(copy);
-
-    if (len >= sizeof(loc_buf)) {
-        temp = new char[len + 1];
-        if (temp == NULL) {
-            return;
-        }
-    }
-    len = vsnprintf(temp, len + 1, format, arg);
-
-    //log_info("gc_exec_linef:" << temp);
-
-    gc_execute_line(temp);
-
-    va_end(arg);
-    if (temp != loc_buf) {
-        delete[] temp;
-    }
-    if (sync_after) {
-        protocol_buffer_synchronize();
-    }
 }
 
 /*
@@ -2013,7 +2016,7 @@ void gc_exec_linef(bool sync_after, Channel& out, const char* format, ...) {
    group 13 = {G61.1, G64} path control mode (G61 is supported)
 */
 
-static std::optional<WaitOnInputMode> validate_wait_on_input_mode_value(uint8_t value) {
+static std::optional<WaitOnInputMode> validate_wait_on_input_mode_value(objnum_t value) {
     switch (value) {
         case 0:
             return WaitOnInputMode::Immediate;
@@ -2037,21 +2040,37 @@ struct overloaded : Ts... {
 template <class... Ts>
 overloaded(Ts...) -> overloaded<Ts...>;
 
-static Error gc_wait_on_input(bool is_digital, uint8_t input_number, WaitOnInputMode mode, float timeout) {
+static Error gc_wait_on_input(bool is_digital, objnum_t input_number, WaitOnInputMode mode, float timeout) {
     // TODO - only Immediate read mode is supported
     if (mode == WaitOnInputMode::Immediate) {
-        auto const result = is_digital ? config->_userInputs->readDigitalInput(input_number) :
-                                         config->_userInputs->readAnalogInput(input_number);
-        auto const on_ok  = [&](bool result) {
-            log_debug("M66: " << (is_digital ? "digital" : "analog") << "_input" << input_number << " result=" << result);
-            set_numbered_param(5399, result ? 1.0 : 0.0);
-            return Error::Ok;
-        };
-        auto const on_error = [&](Error error) {
-            log_error("M66: " << (is_digital ? "digital" : "analog") << "_input" << input_number << " failed");
-            return error;
-        };
-        return std::visit(overloaded { on_ok, on_error }, result);
+        float result;
+        if (is_digital) {
+            if (input_number >= MaxUserDigitalPin) {
+                return Error::PParamMaxExceeded;
+            }
+            auto& pin = config->_userInputs->digitalInput[input_number];
+            if (pin.undefined()) {
+                log_error(pin.legend() << " is not defined");
+                return Error::PParamMaxExceeded;
+            }
+            result = (float)pin.get();
+            set_numbered_param(5399, result);
+            log_debug("M66: " << pin.legend() << " result=" << result);
+        } else {
+            if (input_number >= MaxUserAnalogPin) {
+                return Error::PParamMaxExceeded;
+            }
+            auto& pin = config->_userInputs->analogInput[input_number];
+            if (pin.undefined()) {
+                log_error(pin.legend() << " is not defined");
+                return Error::PParamMaxExceeded;
+            }
+            result = (float)pin.get();
+            set_numbered_param(5399, result);
+            log_debug("M66: " << pin.legend() << " result=" << result);
+        }
+
+        return Error::Ok;
     }
 
     // TODO - implement rest of modes

@@ -1,17 +1,18 @@
 // Copyright (c) 2014 Luc Lebosse. All rights reserved.
 // Use of this source code is governed by a GPLv3 license that can be found in the LICENSE file.
 
-#include "BTConfig.h"
+#ifdef CONFIG_BT_ENABLED  // BT enabled in SDKConfig
+#    include "BTConfig.h"
 
-#include "src/Machine/MachineConfig.h"
-#include "src/Report.h"  // CLIENT_*
-#include "src/Channel.h"
-#include "src/Logging.h"
+#    include "Machine/MachineConfig.h"
+#    include "Report.h"  // CLIENT_*
+#    include "Channel.h"
+#    include "Logging.h"
 
-#include "esp_bt.h"
-#include "esp_bt_main.h"
+#    include "esp_bt.h"
+#    include "esp_bt_main.h"
 
-#include <cstdint>
+#    include <cstdint>
 
 // SerialBT sends the data over Bluetooth
 namespace WebUI {
@@ -39,11 +40,7 @@ namespace WebUI {
         return SerialBT.write(data);
     }
 
-    BTConfig::BTConfig(const char* name) : Module(name) {
-        bt_enable = new EnumSetting("Bluetooth Enable", WEBSET, WA, "ESP141", "Bluetooth/Enable", 1, &onoffOptions);
-
-        bt_name = new BTNameSetting("Bluetooth name", "ESP140", "Bluetooth/Name", DEFAULT_BT_NAME);
-    }
+    BTConfig::BTConfig(const char* name) : Module(name) {}
 
     void BTConfig::my_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t* param) {
         switch (event) {
@@ -113,7 +110,9 @@ namespace WebUI {
     }
 
     void BTConfig::init() {
-        log_debug("Begin Bluetooth setup");
+        bt_enable = new EnumSetting("Bluetooth Enable", WEBSET, WA, "ESP141", "Bluetooth/Enable", 1, &onoffOptions);
+        bt_name   = new BTNameSetting("Bluetooth name", "ESP140", "Bluetooth/Name", DEFAULT_BT_NAME);
+
         //stop active services
         deinit();
 
@@ -129,6 +128,7 @@ namespace WebUI {
 
             SerialBT.register_callback(&my_spp_cb);
             log_info("BT Started with " << _btname);
+            log_debug("Heap: " << xPortGetFreeHeapSize());
             allChannels.registration(&btChannel);
             return;
         }
@@ -173,3 +173,5 @@ namespace WebUI {
 
     ModuleFactory::InstanceBuilder<BTConfig> bt_module("bt", true);
 }
+
+#endif

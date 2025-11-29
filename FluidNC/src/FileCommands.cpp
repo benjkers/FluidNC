@@ -2,16 +2,16 @@
 // Copyright (c) 2014 Luc Lebosse. All rights reserved.
 // Use of this source code is governed by a GPLv3 license that can be found in the LICENSE file.
 
-#include "src/Settings.h"
-#include "src/WebUI/Authentication.h"
-#include "src/Configuration/JsonGenerator.h"
-#include "src/InputFile.h"    // InputFile
-#include "src/Job.h"          // Job::
-#include "src/xmodem.h"       // xmodemReceive(), xmodemTransmit()
-#include "src/Protocol.h"     // pollingPaused
-#include "src/string_util.h"  // split_prefix()
+#include "Settings.h"
+#include "WebUI/Authentication.h"
+#include "Configuration/JsonGenerator.h"
+#include "InputFile.h"    // InputFile
+#include "Job.h"          // Job::
+#include "xmodem.h"       // xmodemReceive(), xmodemTransmit()
+#include "Protocol.h"     // pollingPaused
+#include "string_util.h"  // split_prefix()
 
-#include "src/HashFS.h"
+#include "HashFS.h"
 
 #include <charconv>
 
@@ -99,8 +99,8 @@ static Error fileShowSome(const char* parameter, AuthenticationLevel auth_level,
 
     std::string_view args(parameter);
 
-    int firstline = 0;
-    int lastline  = 0;
+    uint32_t firstline = 0;
+    uint32_t lastline  = 0;
 
     std::string_view line_range;
     // Syntax: firstline:lastline,filename  or lastline,filename
@@ -117,7 +117,7 @@ static Error fileShowSome(const char* parameter, AuthenticationLevel auth_level,
         log_error_to(out, "Missing line count");
         return Error::InvalidValue;
     }
-    JSONencoder j(true, &out);  // Encapsulated JSON
+    JSONencoder j(&out, "FileLines");  // Encapsulated JSON
 
     std::string_view first;
     string_util::split_prefix(line_range, first, ':');
@@ -144,8 +144,8 @@ static Error fileShowSome(const char* parameter, AuthenticationLevel auth_level,
         error = "Cannot open file";
     } else {
         char  fileLine[255];
-        Error res;
-        for (int linenum = 0; linenum < lastline && (res = theFile->readLine(fileLine, 255)) == Error::Ok; ++linenum) {
+        Error res = Error::Ok;
+        for (uint32_t linenum = 0; linenum < lastline && (res = theFile->readLine(fileLine, 255)) == Error::Ok; ++linenum) {
             if (linenum >= firstline) {
                 j.string(fileLine);
             }
@@ -179,7 +179,7 @@ static Error fileShowHash(const char* parameter, AuthenticationLevel auth_level,
 
     std::string hash = HashFS::hash(parameter);
     replace_string_in_place(hash, "\"", "");
-    JSONencoder j(true, &out);  // Encapsulated JSON
+    JSONencoder j(&out, "FileHash");  // Encapsulated JSON
     j.begin();
     j.begin_member_object("signature");
     j.member("algorithm", "SHA2-256");
@@ -209,7 +209,7 @@ static Error fileSendJson(const char* parameter, AuthenticationLevel auth_level,
 
     const char* status = "ok";
 
-    JSONencoder j(true, &out);  // Encapsulated JSON
+    JSONencoder j(&out, "FileContents");  // Encapsulated JSON
     j.begin();
     j.member("cmd", "$File/SendJSON");
     j.member("argument", parameter);
@@ -222,9 +222,8 @@ static Error fileSendJson(const char* parameter, AuthenticationLevel auth_level,
     } else {
         j.begin_member("result");
 
-        char  fileLine[101];
-        Error res;
-        int   len;
+        char fileLine[101];
+        int  len;
 
         while ((len = theFile->read(fileLine, 100)) > 0) {
             fileLine[len] = '\0';
@@ -309,10 +308,10 @@ static Error listFilesystem(const char* fs, const char* value, AuthenticationLev
         auto      space = stdfs::space(fpath);
         for (auto const& dir_entry : iter) {
             if (dir_entry.is_directory()) {
-                log_stream(out, "[DIR:" << std::string(iter.depth(), ' ').c_str() << dir_entry.path().filename());
+                log_stream(out, "[DIR:" << std::string(iter.depth(), ' ') << dir_entry.path().filename().string());
             } else {
                 log_stream(out,
-                           "[FILE: " << std::string(iter.depth(), ' ').c_str() << dir_entry.path().filename()
+                           "[FILE: " << std::string(iter.depth(), ' ') << dir_entry.path().filename().string()
                                      << "|SIZE:" << dir_entry.file_size());
             }
         }
@@ -320,7 +319,7 @@ static Error listFilesystem(const char* fs, const char* value, AuthenticationLev
         auto freeBytes  = space.available;
         auto usedBytes  = totalBytes - freeBytes;
         log_stream(out,
-                   "[" << fpath.c_str() << " Free:" << formatBytes(freeBytes) << " Used:" << formatBytes(usedBytes)
+                   "[" << fpath.string() << " Free:" << formatBytes(freeBytes) << " Used:" << formatBytes(usedBytes)
                        << " Total:" << formatBytes(totalBytes));
     } catch (std::filesystem::filesystem_error const& ex) {
         log_error_to(out, ex.what());
@@ -344,13 +343,13 @@ static Error listFilesystemJSON(const char* fs, const char* value, Authenticatio
         auto      space = stdfs::space(fpath);
         auto      iter  = stdfs::directory_iterator { fpath };
 
-        JSONencoder j(false, &out);
+        JSONencoder j(&out);
         j.begin();
 
         j.begin_array("files");
         for (auto const& dir_entry : iter) {
             j.begin_object();
-            j.member("name", dir_entry.path().filename());
+            j.member("name", dir_entry.path().filename().string());
             j.member("size", dir_entry.is_directory() ? -1 : dir_entry.file_size());
             j.end_object();
         }
@@ -387,8 +386,7 @@ static Error listLocalFilesJSON(const char* parameter, AuthenticationLevel auth_
 static Error listGCodeFiles(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // No ESP command
     const char* error = "";
 
-    JSONencoder j(true, &out);  // Encapsulated JSON
-    j.begin();
+    JSONencoder j(&out, "FilesList");  // Encapsulated JSON
 
     std::error_code ec;
 
@@ -396,6 +394,8 @@ static Error listGCodeFiles(const char* parameter, AuthenticationLevel auth_leve
     if (ec) {
         error = "No volume";
     }
+
+    j.begin();
 
     j.begin_array("files");
     if (!*error) {  // Array is empty for failure to open the volume
@@ -407,9 +407,9 @@ static Error listGCodeFiles(const char* parameter, AuthenticationLevel auth_leve
             for (auto const& dir_entry : iter) {
                 auto fn     = dir_entry.path().filename();
                 auto is_dir = dir_entry.is_directory();
-                if (out.is_visible(fn.stem(), fn.extension(), is_dir)) {
+                if (out.is_visible(fn.stem().string(), fn.extension().string(), is_dir)) {
                     j.begin_object();
-                    j.member("name", dir_entry.path().filename());
+                    j.member("name", dir_entry.path().filename().string());
                     j.member("size", is_dir ? -1 : dir_entry.file_size());
                     j.end_object();
                 }
@@ -528,10 +528,10 @@ static Error copyDir(const char* iDir, const char* oDir, Channel& out) {  // No 
         } else {
             std::string opath(oDir);
             opath += "/";
-            opath += dir_entry.path().filename().c_str();
+            opath += dir_entry.path().filename().string();
             std::string ipath(iDir);
             ipath += "/";
-            ipath += dir_entry.path().filename().c_str();
+            ipath += dir_entry.path().filename().string();
             log_info_to(out, ipath << " -> " << opath);
             auto err1 = copyFile(ipath.c_str(), opath.c_str(), out);
             if (err1 != Error::Ok) {
@@ -601,11 +601,11 @@ static Error xmodem_receive(const char* value, AuthenticationLevel auth_level, C
     pollingPaused = true;
     bool oldCr    = out.setCr(false);
     delay_ms(1000);
-    int size = xmodemReceive(&out, outfile);
+    int len = xmodemReceive(&out, outfile);
     out.setCr(oldCr);
     pollingPaused = false;
-    if (size >= 0) {
-        log_info("Received " << size << " bytes to file " << outfile->path());
+    if (len >= 0) {
+        log_info("Received " << len << " bytes to file " << outfile->path());
     } else {
         log_info("Reception failed or was canceled");
     }
@@ -613,7 +613,7 @@ static Error xmodem_receive(const char* value, AuthenticationLevel auth_level, C
     delete outfile;
     HashFS::rehash_file(fname);
 
-    return size < 0 ? Error::UploadFailed : Error::Ok;
+    return len < 0 ? Error::UploadFailed : Error::Ok;
 }
 
 static Error xmodem_send(const char* value, AuthenticationLevel auth_level, Channel& out) {
@@ -630,15 +630,15 @@ static Error xmodem_send(const char* value, AuthenticationLevel auth_level, Chan
     }
     bool oldCr = out.setCr(false);
     log_info("Sending " << value << " via XModem");
-    int size = xmodemTransmit(&out, infile);
+    int len = xmodemTransmit(&out, infile);
     out.setCr(oldCr);
     delete infile;
-    if (size >= 0) {
-        log_info("Sent " << size << " bytes");
+    if (len >= 0) {
+        log_info("Sent " << len << " bytes");
     } else {
         log_info("Sending failed or was canceled");
     }
-    return size < 0 ? Error::DownloadFailed : Error::Ok;
+    return len < 0 ? Error::DownloadFailed : Error::Ok;
 }
 
 static Error restart(const char* parameter, AuthenticationLevel auth_level, Channel& out) {
@@ -652,10 +652,10 @@ void make_file_commands() {
     new WebCommand("FORMAT", WEBCMD, WA, "ESP710", "LocalFS/Format", formatLocalFS);
     new WebCommand("path", WEBCMD, WU, NULL, "LocalFS/Show", showLocalFile);
     new WebCommand("path", WEBCMD, WU, "ESP700", "LocalFS/Run", runLocalFile, nullptr);
-    new WebCommand("path", WEBCMD, WU, NULL, "LocalFS/List", listLocalFiles);
-    new WebCommand("path", WEBCMD, WU, NULL, "LocalFS/ListJSON", listLocalFilesJSON);
-    new WebCommand("path", WEBCMD, WU, NULL, "LocalFS/Delete", deleteLocalFile);
-    new WebCommand("path", WEBCMD, WU, NULL, "LocalFS/Rename", renameLocalObject);
+    new WebCommand("path", WEBCMD, WU, NULL, "LocalFS/List", listLocalFiles, allowConfigStates);
+    new WebCommand("path", WEBCMD, WU, NULL, "LocalFS/ListJSON", listLocalFilesJSON, allowConfigStates);
+    new WebCommand("path", WEBCMD, WU, NULL, "LocalFS/Delete", deleteLocalFile, allowConfigStates);
+    new WebCommand("path", WEBCMD, WU, NULL, "LocalFS/Rename", renameLocalObject, allowConfigStates);
     new WebCommand("path", WEBCMD, WU, NULL, "LocalFS/Backup", backupLocalFS);
     new WebCommand("path", WEBCMD, WU, NULL, "LocalFS/Restore", restoreLocalFS);
     new WebCommand("path", WEBCMD, WU, NULL, "LocalFS/Migrate", migrateLocalFS);
@@ -673,7 +673,7 @@ void make_file_commands() {
     new WebCommand(NULL, WEBCMD, WU, "ESP200", "SD/Status", showSDStatus);
     new WebCommand("path", WEBCMD, WU, NULL, "Files/ListGCode", listGCodeFiles);
     new UserCommand("XR", "Xmodem/Receive", xmodem_receive, allowConfigStates);
-    new UserCommand("XS", "Xmodem/Send", xmodem_send, notIdleOrAlarm);
+    new UserCommand("XS", "Xmodem/Send", xmodem_send, allowConfigStates);
 
     new WebCommand("RESTART", WEBCMD, WA, NULL, "Bye", restart);
 }

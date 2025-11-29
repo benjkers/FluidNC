@@ -16,6 +16,7 @@
 #include "Machine/MachineConfig.h"  // config
 #include <string_view>
 #include <charconv>
+#include "Pins/ExtPinDetail.h"
 
 Pins::PinDetail* Pin::undefinedPin = new Pins::VoidPinDetail();
 Pins::PinDetail* Pin::errorPin     = new Pins::ErrorPinDetail("unknown");
@@ -34,59 +35,47 @@ const char* Pin::parse(std::string_view pin_str, Pins::PinDetail*& pinImplementa
     pin_str = string_util::trim(pin_str);
 
     if (pin_str.empty()) {
-        // Re-use undefined pins happens in 'create':
+        // Reuse undefined pins happens in 'create':
         pinImplementation = undefinedPin;
         return nullptr;
     }
 
-    auto             dot_idx = pin_str.find('.');
-    std::string_view prefix  = pin_str.substr(0, dot_idx);
-    if (dot_idx != std::string::npos) {
-        dot_idx += 1;
-    }
-    pin_str.remove_prefix(dot_idx);
+    std::string_view pin_type;
+    string_util::split_prefix(pin_str, pin_type, '.');
 
     if (verbose_debugging) {
-        log_info("Parsed pin prefix: " << prefix << ", rest: " << pin_str);
+        log_info("Parsed pin type: " << pin_type << ", rest: " << pin_str);
     }
 
-    char*    pin_number_end = nullptr;
-    uint32_t pin_number     = std::strtoul(pin_str.cbegin(), &pin_number_end, 10);
-    pin_str.remove_prefix(pin_number_end - pin_str.cbegin());
+    std::string_view num_str;
+    string_util::split_prefix(pin_str, num_str, ':');
+
+    uint32_t pin_number;
+    string_util::from_decimal(num_str, pin_number);
 
     if (verbose_debugging) {
-        log_info("Parsed pin number: " << pin_number << ", rest: " << pin_str);
-    }
-
-    if (!pin_str.empty() && pin_str[0] == ':') {
-        pin_str.remove_prefix(1);
-        if (pin_str.empty()) {
-            return "Pin attributes after ':' were expected.";
-        }
-    }
-
-    if (verbose_debugging) {
-        log_info("Remaining pin options: " << pin_str);
+        log_info("Parsed pin number: " << pin_number << ", options: " << pin_str);
     }
 
     // Build an options parser:
     Pins::PinOptionsParser parser(pin_str);
 
     // Build this pin:
-    if (string_util::equal_ignore_case(prefix, "gpio")) {
+    if (string_util::equal_ignore_case(pin_type, "gpio")) {
         pinImplementation = new Pins::GPIOPinDetail(static_cast<pinnum_t>(pin_number), parser);
         return nullptr;
     }
-    if (string_util::equal_ignore_case(prefix, "i2so")) {
+#if MAX_N_I2SO
+    if (string_util::equal_ignore_case(pin_type, "i2so")) {
         pinImplementation = new Pins::I2SOPinDetail(static_cast<pinnum_t>(pin_number), parser);
         return nullptr;
     }
-
-    if (string_util::starts_with_ignore_case(prefix, "uart_channel")) {
-        auto num_str     = prefix.substr(strlen("uart_channel"));
-        int  channel_num = -1;
-        std::from_chars(num_str.data(), num_str.data() + num_str.size(), channel_num);
-        if (channel_num == -1 || channel_num > 2) {
+#endif
+    if (string_util::starts_with_ignore_case(pin_type, "uart_channel")) {
+        auto     num_str = pin_type.substr(strlen("uart_channel"));
+        objnum_t channel_num;
+        auto [ptr, ec] = std::from_chars(num_str.data(), num_str.data() + num_str.size(), channel_num);
+        if (ec != std::errc() || ptr != (num_str.data() + num_str.size())) {
             return "Bad uart_channel number";
         }
         if (config->_uart_channels[channel_num] == nullptr) {
@@ -97,26 +86,36 @@ const char* Pin::parse(std::string_view pin_str, Pins::PinDetail*& pinImplementa
         return nullptr;
     }
 
-    if (string_util::equal_ignore_case(prefix, "no_pin")) {
+    if (string_util::equal_ignore_case(pin_type, "no_pin")) {
         pinImplementation = undefinedPin;
         return nullptr;
     }
 
-    if (string_util::equal_ignore_case(prefix, "void")) {
+    if (string_util::equal_ignore_case(pin_type, "void")) {
         // Note: having multiple void pins has its uses for debugging.
         pinImplementation = new Pins::VoidPinDetail();
         return nullptr;
     }
 
+    if (string_util::starts_with_ignore_case(pin_type, "pinext")) {
+        if (pin_type.length() == 7 && isdigit(pin_type[6])) {
+            auto deviceId     = pin_type[6] - '0';
+            pinImplementation = new Pins::ExtPinDetail(deviceId, pinnum_t(pin_number), parser);
+        } else {
+            // For now this should be sufficient, if not we can easily change it to 100 extenders:
+            return "Incorrect pin extender specification. Expected 'pinext[0-9].[port number]'.";
+        }
+    }
+
     if (pinImplementation == nullptr) {
-        log_error("Unknown prefix:" << prefix);
-        return "Unknown pin prefix";
+        log_error("Unknown pin type:" << pin_type);
+        return "Unknown pin type";
     }
 #ifdef DEBUG_PIN_DUMP
     pinImplementation = new Pins::DebugPinDetail(pinImplementation);
     return nullptr;
 #else
-    return "Unknown pin prefix";
+    return "Unknown pin type";
 #endif
 }
 
@@ -134,9 +133,9 @@ Pin Pin::create(std::string_view str) {
         } else {
             return Pin(pinImplementation);
         }
-    } catch (const AssertionFailed& ex) {  // We shouldn't get here under normal circumstances.
+    } catch (std::exception& ex) {  // We shouldn't get here under normal circumstances.
         log_error(str << " - " << ex.what());
-        Assert(false, "");
+        Assert(false, "Pin creation failed");
         // return Pin(new Pins::ErrorPinDetail(str.str()));
     }
 }

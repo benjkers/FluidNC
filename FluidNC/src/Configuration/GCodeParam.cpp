@@ -1,15 +1,21 @@
 // Copyright (c) 2021 -	Stefan de Bruijn
 // Use of this source code is governed by a GPLv3 license that can be found in the LICENSE file.
 
+#include "Config.h"
 #include "GCodeParam.h"
 
 #include <cstdlib>
 
 namespace Configuration {
-    GCodeParam::GCodeParam(const char* key, float& iovalue, bool get) : _iovalue(iovalue), _get(get) {
+    GCodeParam::GCodeParam(std::string_view key, float& iovalue, bool get) : setting_(key), _iovalue(iovalue), _get(get) {
         // Remove leading '/' if it is present
-        setting_ = (*key == '/') ? key + 1 : key;
+        if (setting_.front() == '/') {
+            setting_.remove_prefix(1);
+        }
         // Also remove trailing '/' if it is present
+        if (setting_.back() == '/') {
+            setting_.remove_suffix(1);
+        }
 
         start_ = setting_;
     }
@@ -23,17 +29,14 @@ namespace Configuration {
             auto previous = start_;
 
             // Figure out next node
-            auto next = start_;
-            for (; *next && *next != '/'; ++next) {}
+            std::string_view residue;
+            string_util::split(start_, residue, '/');
 
-            // Do we have a child?
-            if (*next == '/' && next[1] != '\0') {
-                ++next;
-                start_ = next;
-                // Handle child:
-                value->group(*this);
-            } else {
+            if (residue.empty()) {
                 error();
+            } else {
+                start_ = residue;
+                value->group(*this);
             }
 
             // Restore situation:
@@ -97,13 +100,24 @@ namespace Configuration {
         }
     }
 
-    void GCodeParam::item(const char* name, int& value, const EnumItem* e) {
+    void GCodeParam::item(const char* name, uint32_t& value, const EnumItem* e) {
         if (is(name)) {
             isHandled_ = true;
             if (_get) {
                 _iovalue = value;
             } else {
                 value = _iovalue;
+            }
+        }
+    }
+
+    void GCodeParam::item(const char* name, axis_t& value) {
+        if (is(name)) {
+            isHandled_ = true;
+            if (_get) {
+                _iovalue = float(value);
+            } else {
+                value = static_cast<axis_t>(_iovalue);
             }
         }
     }
@@ -127,6 +141,12 @@ namespace Configuration {
     }
 
     void GCodeParam::item(const char* name, EventPin& value) {
+        if (is(name)) {
+            error();
+        }
+    }
+
+    void GCodeParam::item(const char* name, InputPin& value) {
         if (is(name)) {
             error();
         }

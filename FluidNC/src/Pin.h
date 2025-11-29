@@ -3,19 +3,18 @@
 
 #pragma once
 
+#include "Config.h"
 #include "Pins/PinDetail.h"
 
-#include <esp_attr.h>  // IRAM_ATTR
 #include <cstdint>
 #include <string>
 #include <cstring>
 #include <utility>
 #include <string_view>
-#include "Assert.h"
 
 // #define DEBUG_PIN_DUMP  // Pin debugging. WILL spam you with a lot of data!
 
-// Pin class. A pin is basically a thing that can 'output', 'input' or do both. GPIO on an ESP32 comes to mind,
+// Pin class. A pin is basically a thing that can 'output', 'input' or do both.
 // but there are way more possible pins. Think about I2S/I2C/SPI extenders, RS485 driven pin devices and even
 // WiFi wall sockets.
 //
@@ -107,16 +106,22 @@ public:
     // External libraries normally use digitalWrite, digitalRead and setMode. Since we cannot handle that behavior, we
     // just give back the pinnum_t for getNative.
     inline pinnum_t getNative(Capabilities expectedBehavior) const {
-        Assert(_detail->capabilities().has(expectedBehavior), "Requested pin %s does not have the expected behavior.", name().c_str());
+        if (!_detail->capabilities().has(expectedBehavior)) {
+            log_config_error("Pin " << name() << " cannot be used as requested");
+        }
         return _detail->_index;
     }
-    inline int8_t driveStrength() const { return _detail->driveStrength(); }
-    inline bool   canStep() { return _detail->canStep(); }
-    inline int    index() { return _detail->_index; }
-    inline bool   inverted() { return _detail->_inverted; }
+    inline int8_t   driveStrength() const { return _detail->driveStrength(); }
+    inline bool     canStep() { return _detail->canStep(); }
+    inline pinnum_t index() { return _detail->_index; }
+    inline bool     inverted() { return _detail->_inverted; }
 
-    inline void write(bool value) const { _detail->write(value); };
-    inline void synchronousWrite(bool value) const { _detail->synchronousWrite(value); };
+    // In principle, IRAM_ATTR would not be needed for inlined methods, but
+    // the compiler does not seem to actually inline these.  Adding IRAM_ATTR
+    // forces the non-inlined versions into IRAM to prevent crashes when a
+    // spindle state change happens in a stepping interrupt.
+    inline void IRAM_ATTR write(bool value) const { _detail->write(value); };
+    inline void IRAM_ATTR synchronousWrite(bool value) const { _detail->synchronousWrite(value); };
 
     inline void     setDuty(uint32_t duty) const { _detail->setDuty(duty); }
     inline uint32_t maxDuty() const { return _detail->maxDuty(); }
@@ -137,7 +142,7 @@ public:
     // Other functions:
     Capabilities capabilities() const { return _detail->capabilities(); }
 
-    inline std::string name() const { return _detail->toString(); }
+    inline const char* name() const { return _detail->name(); }
 
     void report(const char* legend);
     void report(const std::string& legend) { report(legend.c_str()); }
@@ -146,3 +151,9 @@ public:
 
     ~Pin();
 };
+
+#include <Print.h>
+inline Print& operator<<(Print& lhs, const Pin& v) {
+    lhs.print(v.name());
+    return lhs;
+}

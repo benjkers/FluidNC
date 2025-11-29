@@ -10,7 +10,7 @@ except:
     gitFail = True
 
 if gitFail:
-    tag = "v3.0.x"
+    tag = "v4.x.x"
     rev = " (noGit)"
     url = " (noGit)"
 else:
@@ -21,7 +21,7 @@ else:
             .decode("utf-8")
         )
     except:
-        tag = "v3.0.x"
+        tag = "v4.x.x"
 
     # Check to see if the head commit exactly matches a tag.
     # If so, the revision is "release", otherwise it is BRANCH-COMMIT
@@ -50,11 +50,14 @@ else:
             dirty = ""
         rev = " (%s-%s%s)" % (branchname, revision, dirty)
 
-    url = (
-        subprocess.check_output(["git", "config", "--get", "remote.origin.url"])
+    try:
+        url = (
+            subprocess.check_output(["git", "config", "--get", "remote.origin.url"])
             .strip()
             .decode("utf-8")
         )
+    except:
+        url = "None"
 
 grbl_version = tag.replace('v','').rpartition('.')[0]
 git_info = '%s%s' % (tag, rev)
