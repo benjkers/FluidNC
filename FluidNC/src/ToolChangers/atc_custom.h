@@ -1,10 +1,11 @@
 #pragma once
 
-#include "src/Config.h"
-#include "src/Configuration/Configurable.h"
-#include "src/Parameters.h"
-#include "src/Channel.h"
-#include "src/Module.h"
+#include "Config.h"
+
+#include "Configuration/Configurable.h"
+
+#include "Channel.h"
+#include "Module.h"
 #include "atc.h"
 #include "../Machine/Macros.h"
 namespace ATCs {
@@ -52,7 +53,7 @@ namespace ATCs {
     public:
         void init() override;
         void probe_notification() override;
-        virtual bool tool_change(uint8_t value, bool pre_select, bool set_tool) override;
+        bool tool_change(tool_t value, bool pre_select, bool set_tool) override;
         void validate() override {}
        
         void group(Configuration::HandlerBase& handler) override {
