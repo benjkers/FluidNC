@@ -25,7 +25,7 @@ namespace Spindles {
                 log_info("Spindle Enabled in " << (_is_Ccw ? "CCW" : "CW") << " mode");
                 // Re-send speed if direction has changed without speed command
                 if (_is_Ccw != was_ccw) {
-                    log_debug("Direction changed. Re-sending speed with updated direction.");
+                    log_info("Direction changed. Re-sending speed with updated direction.");
                     set_speed_command(last_speed, data);  // Re-send last speed with new direction
                 }
             }
@@ -35,7 +35,7 @@ namespace Spindles {
             last_speed = dev_speed;  // Store the current speed for future direction changes
             int32_t effective_speed = _is_Ccw ? -static_cast<int32_t>(dev_speed) : dev_speed;
 
-            log_debug("set_speed_command called. Speed: " << dev_speed << " | Effective Speed: " << effective_speed);
+            log_info("set_speed_command called. Speed: " << dev_speed << " | Effective Speed: " << effective_speed);
             data.tx_length = 6;
             data.rx_length = 6;
 
