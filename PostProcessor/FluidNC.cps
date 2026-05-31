@@ -23,7 +23,7 @@ minimumRevision = 45917;
 extension = "nc";
 setCodePage("ascii");
 
-capabilities = CAPABILITY_MILLING | CAPABILITY_MACHINE_SIMULATION;
+capabilities = CAPABILITY_MILLING | CAPABILITY_MACHINE_SIMULATION |CAPABILITY_PROBING ;
 tolerance = spatial(0.002, MM);
 
 minimumChordLength = spatial(0.25, MM);
@@ -36,6 +36,14 @@ allowedCircularPlanes = undefined; // allow any circular motion
 
 // user-defined properties
 properties = {
+  useVectorProbing: {
+    title      : "Use Vector Probing",
+    description: "Outputs macro variables and triggers FluidNC Vector Probing files.",
+    type       : "boolean",
+    value      : true,
+    scope      : "post"
+  },
+  
   safePositionMethod: {
     title      : "Safe Retracts",
     description: "Select your desired retract option. 'Clearance Height' retracts to the operation clearance height.",
@@ -1874,8 +1882,7 @@ function writeRetract() {
     }
   }
 }
-// <<<<< INCLUDED FROM include_files/writeRetract_fanuc.cpi
-// >>>>> INCLUDED FROM include_files/getOffsetCode_fanuc.cpi
+
 var toolLengthCompOutput = createOutputVariable({control : CONTROL_FORCE,
   onchange: function() {
     state.tcpIsActive = toolLengthCompOutput.getCurrent() == 43.4 || toolLengthCompOutput.getCurrent() == 43.5;
@@ -1894,5 +1901,77 @@ function getOffsetCode() {
   }
   return toolLengthCompOutput.format(offsetCode);
 }
-// <<<<< INCLUDED FROM include_files/getOffsetCode_fanuc.cpi
-// <<<<< INCLUDED FROM ../common/grbl.cps
+
+// >>>>> CUSTOM FLUIDNC VECTOR PROBING ENGINE >>>>>
+
+function onCycle() {
+  // Fusion 360 triggers this at the start of a cycle. 
+  // We execute the logic per-point in onCyclePoint instead.
+}
+
+function onCyclePoint(x, y, z) {
+  // Check if this is a probing operation AND our property is enabled
+  if (cycleType && cycleType.indexOf("probing") !== -1 && getProperty("useVectorProbing")) {
+    
+    // 1. Calculate the true G-code Work Offset number (e.g. 1 = 54, 2 = 55)
+    var wcsValue = (currentWorkOffset > 0) ? (currentWorkOffset + 53) : 54;
+    var wcsP = wcsValue - 53; // for G10 L20 P1
+    
+    // 2. Extract Cycle Parameters from Fusion 360
+    var approach = cycle.probeClearance || 10;
+    var overtravel = cycle.probeOvertravel || 5;
+    var clearanceHeight = cycle.clearance || (z + 10);
+    var probeDepth = cycle.depth || 5;
+    var feed = cycle.feedrate || 200;
+    var probeRadius = tool.diameter / 2;
+    var xDim = cycle.width1 || 0;
+    var yDim = cycle.width2 || 0;
+
+    // 3. Move the probe to the start position safely
+    writeBlock(gMotionModal.format(0), xOutput.format(x), yOutput.format(y));
+    writeBlock(gMotionModal.format(0), zOutput.format(z));
+
+    // 4. Output the Universal Variables for your Macros
+    writeln("");
+    writeComment("--- PROBE MACRO VARS ---");
+    writeBlock("#<WorkOffset> = " + wcsValue);
+    writeBlock("#<Approach> = " + xyzFormat.format(approach));
+    writeBlock("#<Overtravel> = " + xyzFormat.format(overtravel));
+    writeBlock("#<ProbeRadius> = " + xyzFormat.format(probeRadius));
+    writeBlock("#<ProbeFeed> = " + feedFormat.format(feed));
+    writeBlock("#<Clearance_Height> = " + xyzFormat.format(clearanceHeight));
+    writeBlock("#<Height> = " + xyzFormat.format(probeDepth));
+    writeBlock("#<_XDimension> = " + xyzFormat.format(xDim));
+    writeBlock("#<_YDimension> = " + xyzFormat.format(yDim));
+    writeln("");
+
+    // 5. Fire the correct macro based on geometry
+    if (cycleType.indexOf("boss") !== -1 || cycleType.indexOf("outer") !== -1) {
+      writeComment("Execute External Boss/Web Macro");
+      writeBlock("$SD/Run=Probing/ProbeBoss.nc");
+    } 
+    else if (cycleType.indexOf("hole") !== -1 || cycleType.indexOf("pocket") !== -1 || cycleType.indexOf("inner") !== -1) {
+      writeComment("Execute Internal Hole/Pocket Macro");
+      writeBlock("$SD/Run=Probing/ProbeHole.nc");
+    } 
+    else if (cycleType === "probing-z") {
+      writeComment("Execute Z-Top Single Touch");
+      writeBlock("#<VecX>=0");
+      writeBlock("#<VecY>=0");
+      writeBlock("#<VecZ>=-1 * [" + xyzFormat.format(approach + overtravel) + "]");
+      writeBlock("$SD/Run=Probing/ProbeVector.nc");
+      writeBlock("G10 L20 P" + wcsP + " Z[#<_SurfaceZ> - #5063]");
+      writeBlock("$SD/Run=Probing/SyncETS.nc");
+      writeBlock("G90 G53 G0 Z0");
+    } 
+    else {
+      warning("Unsupported Vector Probing Cycle: " + cycleType + ". Use Boss, Hole, Web, Pocket, or Z.");
+    }
+    
+    return; // Exit here so it doesn't try to drill with the probe
+  }
+
+  // If NOT a probing operation (e.g., standard drilling), expand the cycle normally
+  expandCyclePoint(x, y, z);
+}
+// <<<<< CUSTOM FLUIDNC VECTOR PROBING ENGINE <<<<<
