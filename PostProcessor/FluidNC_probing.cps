@@ -1,16 +1,29 @@
+/**
+  Copyright (C) 2012-2024 by Autodesk, Inc.
+  All rights reserved.
 
+  Grbl post processor configuration.
+
+  $Revision: 44131 932990debebb6682fc2eeec860c18e6e6417efcb $
+  $Date: 2024-06-14 09:23:24 $
+
+  FORKID {154F7C00-6549-4c77-ADE0-79375FE5F2AA}
+*/
 
 description = "Grbl";
 vendor = "grbl";
 vendorUrl = "https://github.com/gnea/grbl/wiki";
 longDescription = "Generic milling post for Grbl. Use 'Split file' property to split files by tool for tool changes.";
+
+// >>>>> INCLUDED FROM ../common/grbl.cps
 legal = "Copyright (C) 2012-2024 by Autodesk, Inc.";
 certificationLevel = 2;
 minimumRevision = 45917;
+
 extension = "nc";
 setCodePage("ascii");
 
-capabilities = CAPABILITY_MILLING | CAPABILITY_MACHINE_SIMULATION | CAPABILITY_PROBING;
+capabilities = CAPABILITY_MILLING | CAPABILITY_MACHINE_SIMULATION;
 tolerance = spatial(0.002, MM);
 
 minimumChordLength = spatial(0.25, MM);
@@ -19,19 +32,10 @@ maximumCircularRadius = spatial(1000, MM);
 minimumCircularSweep = toRad(0.01);
 maximumCircularSweep = toRad(180);
 allowHelicalMoves = true;
-allowedCircularPlanes = undefined;
-// allow any circular motion
+allowedCircularPlanes = undefined; // allow any circular motion
 
 // user-defined properties
 properties = {
-  useVectorProbing: {
-    title      : "Use Vector Probing",
-    description: "Outputs macro variables and triggers FluidNC Vector Probing files.",
-    type       : "boolean",
-    value      : true,
-    scope      : "post"
-  },
-  
   safePositionMethod: {
     title      : "Safe Retracts",
     description: "Select your desired retract option. 'Clearance Height' retracts to the operation clearance height.",
@@ -112,6 +116,7 @@ properties = {
     scope: "post"
   }
 };
+
 // wcs definiton
 wcsDefinitions = {
   useZeroOffset: false,
@@ -119,10 +124,12 @@ wcsDefinitions = {
     {name:"Standard", format:"G", range:[54, 59]}
   ]
 };
+
 var subprograms = new Array();
 
 var gFormat = createFormat({prefix:"G", decimals:1});
 var mFormat = createFormat({prefix:"M", decimals:1});
+
 var xyzFormat = createFormat({decimals:(unit == MM ? 3 : 4)});
 var abcFormat = createFormat({decimals:3, forceDecimal:true, scale:DEG});
 var feedFormat = createFormat({decimals:(unit == MM ? 1 : 2)});
@@ -131,6 +138,7 @@ var toolFormat = createFormat({decimals:0});
 var rpmFormat = createFormat({decimals:0});
 var secFormat = createFormat({decimals:3, forceDecimal:true}); // seconds - range 0.001-1000
 var taperFormat = createFormat({decimals:1, scale:DEG});
+
 var xOutput = createOutputVariable({onchange:function() {state.retractedX = false;}, prefix:"X"}, xyzFormat);
 var yOutput = createOutputVariable({onchange:function() {state.retractedY = false;}, prefix:"Y"}, xyzFormat);
 var zOutput = createOutputVariable({onchange:function() {state.retractedZ = false;}, prefix:"Z"}, xyzFormat);
@@ -146,13 +154,10 @@ var iOutput = createOutputVariable({prefix:"I", control:CONTROL_FORCE}, xyzForma
 var jOutput = createOutputVariable({prefix:"J", control:CONTROL_FORCE}, xyzFormat);
 var kOutput = createOutputVariable({prefix:"K", control:CONTROL_FORCE}, xyzFormat);
 
-var gMotionModal = createOutputVariable({}, gFormat);
-// modal group 1 // G0-G3, ...
-var gPlaneModal = createOutputVariable({onchange:function () {gMotionModal.reset();}}, gFormat);
-// modal group 2 // G17-19
+var gMotionModal = createOutputVariable({}, gFormat); // modal group 1 // G0-G3, ...
+var gPlaneModal = createOutputVariable({onchange:function () {gMotionModal.reset();}}, gFormat); // modal group 2 // G17-19
 var gAbsIncModal = createOutputVariable({}, gFormat); // modal group 3 // G90-91
-var gFeedModeModal = createOutputVariable({}, gFormat);
-// modal group 5 // G93-94
+var gFeedModeModal = createOutputVariable({}, gFormat); // modal group 5 // G93-94
 var gUnitModal = createOutputVariable({}, gFormat); // modal group 6 // G20-21
 var fourthAxisClamp = createOutputVariable({}, mFormat);
 var fithAxisClamp = createOutputVariable({}, mFormat);
@@ -220,8 +225,7 @@ function onOpen() {
   if (typeof defineMachine == "function") {
     defineMachine(); // hardcoded machine configuration
   }
-  activateMachine();
-  // enable the machine optimizations and settings
+  activateMachine(); // enable the machine optimizations and settings
 
   if (!getProperty("separateWordsWithSpace")) {
     setWordSeparator("");
@@ -319,7 +323,6 @@ function onSection() {
   // tool change
   if (insertToolCall) {
     if (!state.retractedZ) {
-      
       writeRetract(Z);
     }
     writeToolCall(tool, insertToolCall);
@@ -334,11 +337,13 @@ function onSection() {
     currentWorkOffset = undefined;
   }
   writeWCS(currentSection, true);
+
   var abc = defineWorkPlane(currentSection, true);
 
   setCoolant(tool.coolant); // writes the required coolant codes
 
   forceXYZ();
+
   // prepositioning
   var initialPosition = getFramePosition(currentSection.getInitialPosition());
   var isRequired = insertToolCall || state.retractedZ || !state.lengthCompensationActive  || (!isFirstSection() && getPreviousSection().isMultiAxis());
@@ -476,21 +481,17 @@ function onCommand(command) {
     return;
   case COMMAND_LOCK_MULTI_AXIS:
     if (machineConfiguration.isMultiAxisConfiguration()) {
-      // writeBlock(fourthAxisClamp.format(25));
-      // lock 4th axis
+      // writeBlock(fourthAxisClamp.format(25)); // lock 4th axis
       if (machineConfiguration.getNumberOfAxes() > 4) {
-        // writeBlock(fithAxisClamp.format(35));
-        // lock 5th axis
+        // writeBlock(fithAxisClamp.format(35)); // lock 5th axis
       }
     }
     return;
   case COMMAND_UNLOCK_MULTI_AXIS:
     if (machineConfiguration.isMultiAxisConfiguration()) {
-      // writeBlock(fourthAxisClamp.format(26));
-      // unlock 4th axis
+      // writeBlock(fourthAxisClamp.format(26)); // unlock 4th axis
       if (machineConfiguration.getNumberOfAxes() > 4) {
-        // writeBlock(fithAxisClamp.format(36));
-        // unlock 5th axis
+        // writeBlock(fithAxisClamp.format(36)); // unlock 5th axis
       }
     }
     return;
@@ -512,8 +513,7 @@ function onCommand(command) {
 
 function onSectionEnd() {
   if (currentSection.isMultiAxis()) {
-    writeBlock(gFeedModeModal.format(94));
-    // inverse time feed off
+    writeBlock(gFeedModeModal.format(94)); // inverse time feed off
   }
   writeBlock(gPlaneModal.format(17));
   if (!isLastSection() && (getNextSection().getTool().coolant != tool.coolant)) {
@@ -526,14 +526,12 @@ function onSectionEnd() {
 }
 
 // Start of onRewindMachine logic
-/** Allow user to override the onRewind logic.
-*/
+/** Allow user to override the onRewind logic. */
 function onRewindMachineEntry(_a, _b, _c) {
   return false;
 }
 
-/** Retract to safe position before indexing rotaries.
-*/
+/** Retract to safe position before indexing rotaries. */
 function onMoveToSafeRetractPosition() {
   writeRetract(Z);
 }
@@ -575,8 +573,7 @@ function writeProgramEnd() {
   forceWorkPlane();
   setWorkPlane(new Vector(0, 0, 0)); // reset working plane
   onCommand(COMMAND_STOP_SPINDLE);
-  writeBlock(mFormat.format(30));
-  // stop program, spindle stop, coolant off
+  writeBlock(mFormat.format(30)); // stop program, spindle stop, coolant off
   if (isRedirecting()) {
     closeRedirection();
   }
@@ -588,6 +585,8 @@ function onClose() {
   writeProgramEnd();
 }
 
+// >>>>> INCLUDED FROM include_files/commonFunctions.cpi
+// internal variables, do not change
 var receivedMachineConfiguration;
 var tcp = {isSupportedByControl:getSetting("supportsTCP", true), isSupportedByMachine:false, isSupportedByOperation:false};
 var state = {
@@ -605,8 +604,7 @@ var sequenceNumber;
 var optionalSection = false;
 var currentWorkOffset;
 var forceSpindleSpeed = false;
-var operationNeedsSafeStart = false;
-// used to convert blocks to optional for safeStartAllOperations
+var operationNeedsSafeStart = false; // used to convert blocks to optional for safeStartAllOperations
 
 function activateMachine() {
   // disable unsupported rotary axes output
@@ -621,11 +619,11 @@ function activateMachine() {
   }
 
   // setup usage of useTiltedWorkplane
-  settings.workPlaneMethod.useTiltedWorkplane = getProperty("useTiltedWorkplane") != undefined ?
-    getProperty("useTiltedWorkplane") :
+  settings.workPlaneMethod.useTiltedWorkplane = getProperty("useTiltedWorkplane") != undefined ? getProperty("useTiltedWorkplane") :
     getSetting("workPlaneMethod.useTiltedWorkplane", false);
   settings.workPlaneMethod.useABCPrepositioning = getProperty("useABCPrepositioning") != undefined ? getProperty("useABCPrepositioning") :
     getSetting("workPlaneMethod.useABCPrepositioning", false);
+
   if (!machineConfiguration.isMultiAxisConfiguration()) {
     return; // don't need to modify any settings for 3-axis machines
   }
@@ -642,10 +640,10 @@ function activateMachine() {
     mode     : mode,
     maximum  : machineConfiguration.getMultiAxisFeedrateMaximum(),
     type     : type,
-    tolerance: mode == FEED_DPM ?
-      machineConfiguration.getMultiAxisFeedrateOutputTolerance() : 0,
+    tolerance: mode == FEED_DPM ? machineConfiguration.getMultiAxisFeedrateOutputTolerance() : 0,
     bpwRatio : mode == FEED_DPM ? machineConfiguration.getMultiAxisFeedrateBpwRatio() : 1
   };
+
   // setup of retract/reconfigure  TAG: Only needed until post kernel supports these machine config settings
   if (receivedMachineConfiguration && machineConfiguration.performRewinds()) {
     safeRetractDistance = machineConfiguration.getSafeRetractDistance();
@@ -664,8 +662,7 @@ function activateMachine() {
     for (var i = 0; i < getNumberOfSections(); ++i) {
       var section = getSection(i);
       if (section.isMultiAxis()) {
-        machineConfiguration.setToolLength(getBodyLength(section.getTool()));
-        // define the tool length for head adjustments
+        machineConfiguration.setToolLength(getBodyLength(section.getTool())); // define the tool length for head adjustments
         section.optimizeMachineAnglesByMachine(machineConfiguration, OPTIMIZE_AXIS);
       }
     }
@@ -686,24 +683,21 @@ function getBodyLength(tool) {
 
 function getFeed(f) {
   if (getProperty("useG95")) {
-    return feedOutput.format(f / spindleSpeed);
-    // use feed value
+    return feedOutput.format(f / spindleSpeed); // use feed value
   }
   if (typeof activeMovements != "undefined" && activeMovements) {
     var feedContext = activeMovements[movement];
     if (feedContext != undefined) {
       if (!feedFormat.areDifferent(feedContext.feed, f)) {
         if (feedContext.id == currentFeedId) {
-          return "";
-          // nothing has changed
+          return ""; // nothing has changed
         }
         forceFeed();
         currentFeedId = feedContext.id;
         return settings.parametricFeeds.feedOutputVariable + (settings.parametricFeeds.firstFeedParameter + feedContext.id);
       }
     }
-    currentFeedId = undefined;
-    // force parametric feed next time
+    currentFeedId = undefined; // force parametric feed next time
   }
   return feedOutput.format(f); // use feed value
 }
@@ -733,10 +727,8 @@ function validateCommonParameters() {
     error(localize("The machine configuration has TCP enabled which is not supported by this postprocessor."));
   }
   if (getProperty("safePositionMethod") == "clearanceHeight") {
-    var msg = "-Attention- Property 'Safe Retracts' is set to 'Clearance Height'."
-      + EOL +
-      "Ensure the clearance height will clear the part and or fixtures."
-      + EOL +
+    var msg = "-Attention- Property 'Safe Retracts' is set to 'Clearance Height'." + EOL +
+      "Ensure the clearance height will clear the part and or fixtures." + EOL +
       "Raise the Z-axis to a safe height before starting the program.";
     warning(msg);
     writeComment(msg);
@@ -745,23 +737,19 @@ function validateCommonParameters() {
 
 function validateToolData() {
   var _default = 99999;
-  var _maximumSpindleRPM = machineConfiguration.getMaximumSpindleSpeed() > 0 ?
-    machineConfiguration.getMaximumSpindleSpeed() :
+  var _maximumSpindleRPM = machineConfiguration.getMaximumSpindleSpeed() > 0 ? machineConfiguration.getMaximumSpindleSpeed() :
     settings.maximumSpindleRPM == undefined ? _default : settings.maximumSpindleRPM;
   var _maximumToolNumber = machineConfiguration.isReceived() && machineConfiguration.getNumberOfTools() > 0 ? machineConfiguration.getNumberOfTools() :
-    settings.maximumToolNumber == undefined ?
-    _default : settings.maximumToolNumber;
+    settings.maximumToolNumber == undefined ? _default : settings.maximumToolNumber;
   var _maximumToolLengthOffset = settings.maximumToolLengthOffset == undefined ? _default : settings.maximumToolLengthOffset;
-  var _maximumToolDiameterOffset = settings.maximumToolDiameterOffset == undefined ?
-    _default : settings.maximumToolDiameterOffset;
+  var _maximumToolDiameterOffset = settings.maximumToolDiameterOffset == undefined ? _default : settings.maximumToolDiameterOffset;
 
   var header = ["Detected maximum values are out of range.", "Maximum values:"];
   var warnings = {
     toolNumber    : {msg:"Tool number value exceeds the maximum value for tool: " + EOL, max:" Tool number: " + _maximumToolNumber, values:[]},
     lengthOffset  : {msg:"Tool length offset value exceeds the maximum value for tool: " + EOL, max:" Tool length offset: " + _maximumToolLengthOffset, values:[]},
     diameterOffset: {msg:"Tool diameter offset value exceeds the maximum value for tool: " + EOL, max:" Tool diameter offset: " + _maximumToolDiameterOffset, values:[]},
-    spindleSpeed  : {msg:"Spindle speed exceeds the maximum value for operation: " + EOL, 
-    max:" Spindle speed: " + _maximumSpindleRPM, values:[]}
+    spindleSpeed  : {msg:"Spindle speed exceeds the maximum value for operation: " + EOL, max:" Spindle speed: " + _maximumSpindleRPM, values:[]}
   };
 
   var toolIds = [];
@@ -772,6 +760,7 @@ function validateToolData() {
       var lengthOffset = section.getTool().lengthOffset;
       var diameterOffset = section.getTool().diameterOffset;
       var comment = section.getParameter("operation-comment", "");
+
       if (toolNumber > _maximumToolNumber && !getProperty("toolAsName")) {
         warnings.toolNumber.values.push(SP + toolNumber + EOL);
       }
@@ -801,8 +790,7 @@ function validateToolData() {
   var warningMessages = [];
   for (var key in warnings) {
     if (warnings[key].values != "") {
-      header.push(warnings[key].max);
-      // add affected max values to the header
+      header.push(warnings[key].max); // add affected max values to the header
       warningMessages.push(warnings[key].msg + warnings[key].values.join(""));
     }
   }
@@ -894,8 +882,7 @@ function formatComment(text) {
     text = filterText(String(text), _permittedCommentChars);
   }
   text = String(text).substring(0, settings.comments.maximumLineLength - prefix.length - suffix.length);
-  return text != "" ?
-  prefix + text + suffix : "";
+  return text != "" ?  prefix + text + suffix : "";
 }
 
 /**
@@ -938,31 +925,24 @@ var optionalState = JSON.parse(JSON.stringify(state));
 var saveCurrentSectionId = undefined;
 function writeStartBlocks(isRequired, code) {
   var saveSkipBlocks = skipBlocks;
-  var saveMainState = state;
-  // save main state
+  var saveMainState = state; // save main state
 
   if (!isRequired) {
     if (!getProperty("safeStartAllOperations", false)) {
-      return;
-      // when safeStartAllOperations is disabled, dont output code and return
+      return; // when safeStartAllOperations is disabled, dont output code and return
     }
     if (saveCurrentSectionId != getCurrentSectionId()) {
       saveCurrentSectionId = getCurrentSectionId();
       forceModals(); // force all modal variables when entering a new section
-      optionalState = Object.create(initialState);
-      // reset optionalState to initialState when entering a new section
+      optionalState = Object.create(initialState); // reset optionalState to initialState when entering a new section
     }
-    skipBlocks = true;
-    // if values are not required, but safeStartAllOperations is enabled - write following blocks as optional
-    state = optionalState;
-    // set state to optionalState if skipBlocks is true
+    skipBlocks = true; // if values are not required, but safeStartAllOperations is enabled - write following blocks as optional
+    state = optionalState; // set state to optionalState if skipBlocks is true
     state.mainState = false;
   }
-  code();
-  // writes out the code which is passed to this function as an argument
+  code(); // writes out the code which is passed to this function as an argument
 
-  state = saveMainState;
-  // restore main state
+  state = saveMainState; // restore main state
   skipBlocks = saveSkipBlocks; // restore skipBlocks value
 }
 
@@ -998,14 +978,12 @@ function forceModals() {
     }
   } else {
     for (var i in arguments) {
-      arguments[i].reset();
-      // only reset the modal variable passed to this function
+      arguments[i].reset(); // only reset the modal variable passed to this function
     }
   }
 }
 
-/** Helper function to be able to use a default value for settings which do not exist.
-*/
+/** Helper function to be able to use a default value for settings which do not exist. */
 function getSetting(setting, defaultValue) {
   var result = defaultValue;
   var keys = setting.split(".");
@@ -1054,8 +1032,7 @@ function getForwardDirection(_section) {
 function getRetractParameters() {
   var _arguments = typeof arguments[0] === "object" ? arguments[0].axes : arguments;
   var singleLine = arguments[0].singleLine == undefined ? true : arguments[0].singleLine;
-  var words = [];
-  // store all retracted axes in an array
+  var words = []; // store all retracted axes in an array
   var retractAxes = new Array(false, false, false);
   var method = getProperty("safePositionMethod", "undefined");
   if (method == "clearanceHeight") {
@@ -1083,8 +1060,7 @@ function getRetractParameters() {
   // define home positions
   var useZeroValues = (settings.retract.useZeroValues && settings.retract.useZeroValues.indexOf(method) != -1);
   var _xHome = machineConfiguration.hasHomePositionX() && !useZeroValues ? machineConfiguration.getHomePositionX() : toPreciseUnit(0, MM);
-  var _yHome = machineConfiguration.hasHomePositionY() && !useZeroValues ?
-    machineConfiguration.getHomePositionY() : toPreciseUnit(0, MM);
+  var _yHome = machineConfiguration.hasHomePositionY() && !useZeroValues ? machineConfiguration.getHomePositionY() : toPreciseUnit(0, MM);
   var _zHome = machineConfiguration.getRetractPlane() != 0 && !useZeroValues ? machineConfiguration.getRetractPlane() : toPreciseUnit(0, MM);
   for (var i = 0; i < _arguments.length; ++i) {
     switch (_arguments[i]) {
@@ -1117,15 +1093,13 @@ function getRetractParameters() {
   return {method:method, retractAxes:retractAxes, words:words, singleLine:singleLine};
 }
 
-/** Returns true when subprogram logic does exist into the post.
-*/
+/** Returns true when subprogram logic does exist into the post. */
 function subprogramsAreSupported() {
   return typeof subprogramState != "undefined";
 }
 // <<<<< INCLUDED FROM include_files/commonFunctions.cpi
 // >>>>> INCLUDED FROM include_files/defineMachine.cpi
-var compensateToolLength = false;
-// add the tool length to the pivot distance for nonTCP rotary heads
+var compensateToolLength = false; // add the tool length to the pivot distance for nonTCP rotary heads
 function defineMachine() {
   var useTCP = true;
   if (false) { // note: setup your machine here
@@ -1143,27 +1117,20 @@ function defineMachine() {
   if (!receivedMachineConfiguration) {
     // multiaxis settings
     if (machineConfiguration.isHeadConfiguration()) {
-      machineConfiguration.setVirtualTooltip(false);
-      // translate the pivot point to the virtual tool tip for nonTCP rotary heads
+      machineConfiguration.setVirtualTooltip(false); // translate the pivot point to the virtual tool tip for nonTCP rotary heads
     }
 
     // retract / reconfigure
-    var performRewinds = false;
-    // set to true to enable the rewind/reconfigure logic
+    var performRewinds = false; // set to true to enable the rewind/reconfigure logic
     if (performRewinds) {
-      machineConfiguration.enableMachineRewinds();
-      // enables the retract/reconfigure logic
-      safeRetractDistance = (unit == IN) ? 1 : 25;
-      // additional distance to retract out of stock, can be overridden with a property
-      safeRetractFeed = (unit == IN) ?
-      20 : 500; // retract feed rate
-      safePlungeFeed = (unit == IN) ?
-      10 : 250; // plunge feed rate
+      machineConfiguration.enableMachineRewinds(); // enables the retract/reconfigure logic
+      safeRetractDistance = (unit == IN) ? 1 : 25; // additional distance to retract out of stock, can be overridden with a property
+      safeRetractFeed = (unit == IN) ? 20 : 500; // retract feed rate
+      safePlungeFeed = (unit == IN) ? 10 : 250; // plunge feed rate
       machineConfiguration.setSafeRetractDistance(safeRetractDistance);
       machineConfiguration.setSafeRetractFeedrate(safeRetractFeed);
       machineConfiguration.setSafePlungeFeedrate(safePlungeFeed);
-      var stockExpansion = new Vector(toPreciseUnit(0.1, IN), toPreciseUnit(0.1, IN), toPreciseUnit(0.1, IN));
-      // expand stock XYZ values
+      var stockExpansion = new Vector(toPreciseUnit(0.1, IN), toPreciseUnit(0.1, IN), toPreciseUnit(0.1, IN)); // expand stock XYZ values
       machineConfiguration.setRewindStockExpansion(stockExpansion);
     }
 
@@ -1258,8 +1225,7 @@ function getWorkPlaneMachineABC(_section, rotate) {
       setRotation(useTCP ? _section.workPlane : R);
     } else {
       if (!_section.isOptimizedForMachine()) {
-        machineConfiguration.setToolLength(compensateToolLength ? _section.getTool().overallLength : 0);
-        // define the tool length for head adjustments
+        machineConfiguration.setToolLength(compensateToolLength ? _section.getTool().overallLength : 0); // define the tool length for head adjustments
         _section.optimize3DPositionsByMachine(machineConfiguration, abc, settings.workPlaneMethod.optimizeType);
       }
     }
@@ -1272,6 +1238,7 @@ function getWorkPlaneMachineABC(_section, rotate) {
 var previousA = undefined;
 var previousB = undefined;
 var previousC = undefined;
+
 function positionABC(abc, force) {
   if (!machineConfiguration.isMultiAxisConfiguration()) {
     error("Function 'positionABC' can only be used with multi-axis machine configurations.");
@@ -1289,8 +1256,10 @@ function positionABC(abc, force) {
  // Check if there is a change in A, B, or C positions
   var hasABCorCChanged = (previousA !== abc.x) || (previousB !== abc.y) || (previousC !== abc.z);
 
+  
+   
   if (a || b || c) {
-    writeRetract(Z);
+    writeRetract(Z);       
     if (getProperty("retractToHomeOnABC") && hasABCorCChanged) {
       writeRetract(X, Y);
       writeBlock(currentSection.wcs);          
@@ -1300,8 +1269,7 @@ function positionABC(abc, force) {
     writeBlock(gMotionModal.format(0), a, b, c);
 
     if (getCurrentSectionId() != -1) {
-        setCurrentABC(abc);
-        // required for machine simulation
+        setCurrentABC(abc); // required for machine simulation
     }
 
     // Update the previous positions
@@ -1309,6 +1277,9 @@ function positionABC(abc, force) {
     previousB = abc.y;
     previousC = abc.z;
   }
+  
+
+  
 }
 // <<<<< INCLUDED FROM include_files/positionABC.cpi
 // >>>>> INCLUDED FROM include_files/coolant.cpi
@@ -1336,15 +1307,13 @@ function setCoolant(coolant) {
 
 function getCoolantCodes(coolant, format) {
   if (!getProperty("useCoolant", true)) {
-    return undefined;
-    // coolant output is disabled by property if it exists
+    return undefined; // coolant output is disabled by property if it exists
   }
   isOptionalCoolant = false;
   if (typeof operationNeedsSafeStart == "undefined") {
     operationNeedsSafeStart = false;
   }
-  var multipleCoolantBlocks = new Array();
-  // create a formatted array to be passed into the outputted line
+  var multipleCoolantBlocks = new Array(); // create a formatted array to be passed into the outputted line
   var coolants = settings.coolant.coolants;
   if (!coolants) {
     error(localize("Coolants have not been defined."));
@@ -1356,8 +1325,7 @@ function getCoolantCodes(coolant, format) {
     if (operationNeedsSafeStart && coolant != COOLANT_OFF) {
       isOptionalCoolant = true;
     } else if (!forceCoolant || coolant == COOLANT_OFF) {
-      return undefined;
-      // coolant is already active
+      return undefined; // coolant is already active
     }
   }
   if ((coolant != COOLANT_OFF) && (currentCoolantMode != COOLANT_OFF) && (coolantOff != undefined) && !forceCoolant && !isOptionalCoolant) {
@@ -1370,6 +1338,7 @@ function getCoolantCodes(coolant, format) {
     }
   }
   forceCoolant = false;
+
   var m;
   var coolantCodes = {};
   for (var c in coolants) { // find required coolant codes into the coolants array
@@ -1389,8 +1358,7 @@ function getCoolantCodes(coolant, format) {
     }
   }
   if (coolant == COOLANT_OFF) {
-    m = !coolantOff ?
-      coolantCodes.off : coolantOff; // use the default coolant off command when an 'off' value is not specified
+    m = !coolantOff ? coolantCodes.off : coolantOff; // use the default coolant off command when an 'off' value is not specified
   } else {
     coolantOff = coolantCodes.off;
     m = coolantCodes.on;
@@ -1414,11 +1382,9 @@ function getCoolantCodes(coolant, format) {
       }
     }
     if (format == undefined || format) {
-      return multipleCoolantBlocks;
-      // return the single formatted coolant value
+      return multipleCoolantBlocks; // return the single formatted coolant value
     } else {
-      return m;
-      // return unformatted coolant value
+      return m; // return unformatted coolant value
     }
   }
   return undefined;
@@ -1460,7 +1426,7 @@ function writeToolCall(tool, insertToolCall) {
       onCommand(COMMAND_COOLANT_OFF); // turn off coolant on tool change
       
       if (typeof disableLengthCompensation == "function") {
-         disableLengthCompensation(false);
+        disableLengthCompensation(false);
       }
     }
     
@@ -1484,10 +1450,10 @@ function writeToolCall(tool, insertToolCall) {
 
 function startSpindle(tool, insertToolCall) {
   if (tool.type != TOOL_PROBE) {
-    var spindleSpeedIsRequired = insertToolCall ||
-      forceSpindleSpeed || isFirstSection() ||
+    var spindleSpeedIsRequired = insertToolCall || forceSpindleSpeed || isFirstSection() ||
       rpmFormat.areDifferent(spindleSpeed, sOutput.getCurrent()) ||
       (tool.clockwise != getPreviousSection().getTool().clockwise);
+
     writeStartBlocks(spindleSpeedIsRequired, function () {
       if (spindleSpeedIsRequired || operationNeedsSafeStart) {
         onCommand(COMMAND_START_SPINDLE);
@@ -1521,6 +1487,7 @@ properties.retractToHomeOnABC = {
   value       : false,
   scope       : "post"
 };
+
 function writeProgramHeader() {
   // dump machine configuration
   var vendor = machineConfiguration.getVendor();
@@ -1588,6 +1555,7 @@ var gRotationModal = createOutputVariable({current : 69,
       probeVariables.outputRotationCodes = probeVariables.probeAngleMethod == "G68";
     }
   }}, gFormat);
+
 var currentWorkPlaneABC = undefined;
 function forceWorkPlane() {
   currentWorkPlaneABC = undefined;
@@ -1606,8 +1574,7 @@ function cancelWorkPlane(force) {
     }
     var command = gRotationModal.format(69);
     if (command) {
-      writeBlock(command);
-      // cancel frame
+      writeBlock(command); // cancel frame
       forceWorkPlane();
     }
   }
@@ -1615,13 +1582,13 @@ function cancelWorkPlane(force) {
 
 function setWorkPlane(abc) {
   if (!settings.workPlaneMethod.forceMultiAxisIndexing && is3D() && !machineConfiguration.isMultiAxisConfiguration()) {
-    return;
-    // ignore
+    return; // ignore
   }
   var workplaneIsRequired = (currentWorkPlaneABC == undefined) ||
     abcFormat.areDifferent(abc.x, currentWorkPlaneABC.x) ||
     abcFormat.areDifferent(abc.y, currentWorkPlaneABC.y) ||
     abcFormat.areDifferent(abc.z, currentWorkPlaneABC.z);
+
   writeStartBlocks(workplaneIsRequired, function () {
     writeRetract(Z);
     if (getSetting("retract.homeXY.onIndexing", false)) {
@@ -1647,10 +1614,8 @@ function setWorkPlane(abc) {
         writeBlock(
           gRotationModal.format(68.2), "X" + xyzFormat.format(currentSection.workOrigin.x), "Y" + xyzFormat.format(currentSection.workOrigin.y), "Z" + xyzFormat.format(currentSection.workOrigin.z),
           "I" + abcFormat.format(abc.x), "J" + abcFormat.format(abc.y), "K" + abcFormat.format(abc.z)
-        );
-        // set frame
-        writeBlock(gFormat.format(53.1));
-        // turn machine
+        ); // set frame
+        writeBlock(gFormat.format(53.1)); // turn machine
       }
     } else {
       positionABC(abc, true);
@@ -1678,8 +1643,7 @@ function writeInitialPositioning(position, isRequired, codes1, codes2) {
   var motionCode = {single:0, multi:0};
   switch (highFeedMapping) {
   case HIGH_FEED_MAP_ANY:
-    motionCode = {single:1, multi:1};
-    // map all rapid traversals to high feed
+    motionCode = {single:1, multi:1}; // map all rapid traversals to high feed
     break;
   case HIGH_FEED_MAP_MULTI:
     motionCode = {single:0, multi:1}; // map rapid traversal along more than one axis to high feed
@@ -1699,15 +1663,15 @@ function writeInitialPositioning(position, isRequired, codes1, codes2) {
     // multi axis prepositioning with TWP
     if (currentSection.isMultiAxis() && getSetting("workPlaneMethod.prepositionWithTWP", true) && getSetting("workPlaneMethod.useTiltedWorkplane", false) &&
       tcp.isSupportedByOperation && getCurrentDirection().isNonZero()) {
-      var W = machineConfiguration.isMultiAxisConfiguration() ? machineConfiguration.getOrientation(getCurrentDirection()) : Matrix.getOrientationFromDirection(getCurrentDirection());
+      var W = machineConfiguration.isMultiAxisConfiguration() ? machineConfiguration.getOrientation(getCurrentDirection()) :
+        Matrix.getOrientationFromDirection(getCurrentDirection());
       var prePosition = W.getTransposed().multiply(position);
       var angles = W.getEuler2(settings.workPlaneMethod.eulerConvention);
       setWorkPlane(angles);
       writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(prePosition.x), yOutput.format(prePosition.y), feed, additionalCodes[0]);
       cancelWorkPlane();
       writeBlock(getOffsetCode(), hOffset, additionalCodes[1]); // omit Z-axis output is desired
-      forceAny();
-      // required to output XYZ coordinates in the following line
+      forceAny(); // required to output XYZ coordinates in the following line
     } else {
       if (machineConfiguration.isHeadConfiguration()) {
         writeBlock(modalCodes, gMotionModal.format(motionCode.multi), getOffsetCode(),
@@ -1721,13 +1685,11 @@ function writeInitialPositioning(position, isRequired, codes1, codes2) {
     }
     forceModals(gMotionModal);
     if (isRequired) {
-      additionalCodes = [];
-      // clear additionalCodes buffer
+      additionalCodes = []; // clear additionalCodes buffer
     }
   });
 
-  validate(!validateLengthCompensation || state.lengthCompensationActive, "Tool length compensation is not active.");
-  // make sure that lenght compensation is enabled
+  validate(!validateLengthCompensation || state.lengthCompensationActive, "Tool length compensation is not active."); // make sure that lenght compensation is enabled
   if (!isRequired) { // simple positioning
     var modalCodes = formatWords(gAbsIncModal.format(90), gPlaneModal.format(17));
     if (!state.retractedZ && xyzFormat.getResultingValue(getCurrentPosition().z) < xyzFormat.getResultingValue(position.z)) {
@@ -1802,8 +1764,7 @@ function onLinear(_x, _y, _z, feed) {
     }
   } else if (f) {
     if (getNextRecord().isMotion()) { // try not to output feed without motion
-      forceFeed();
-      // force feed on next line
+      forceFeed(); // force feed on next line
     } else {
       writeBlock(gMotionModal.format(1), f);
     }
@@ -1857,12 +1818,14 @@ function onLinear5D(_x, _y, _z, _a, _b, _c, feed, feedMode) {
   
   var f = feedMode == FEED_INVERSE_TIME ? inverseTimeOutput.format(feed) : getFeed(feed);
   var fMode = feedMode == FEED_INVERSE_TIME ? 93 : getProperty("useG95") ? 95 : 94;
+
+
+
   if (x || y || z || a || b || c) {
     writeBlock(gFeedModeModal.format(fMode), gMotionModal.format(1), x, y, z, a, b, c, f);
   } else if (f) {
     if (getNextRecord().isMotion()) { // try not to output feed without motion
-      forceFeed();
-      // force feed on next line
+      forceFeed(); // force feed on next line
     } else {
       writeBlock(gFeedModeModal.format(fMode), gMotionModal.format(1), f);
     }
@@ -1878,8 +1841,7 @@ function writeRetract() {
       cancelWCSRotation();
     }
     if (typeof disableLengthCompensation == "function" && getSetting("allowCancelTCPBeforeRetracting", false) && state.tcpIsActive) {
-      disableLengthCompensation();
-      // cancel TCP before retracting
+      disableLengthCompensation(); // cancel TCP before retracting
     }
     for (var i in retract.words) {
       var words = retract.singleLine ? retract.words : retract.words[i];
@@ -1912,17 +1874,18 @@ function writeRetract() {
     }
   }
 }
-
+// <<<<< INCLUDED FROM include_files/writeRetract_fanuc.cpi
+// >>>>> INCLUDED FROM include_files/getOffsetCode_fanuc.cpi
 var toolLengthCompOutput = createOutputVariable({control : CONTROL_FORCE,
   onchange: function() {
     state.tcpIsActive = toolLengthCompOutput.getCurrent() == 43.4 || toolLengthCompOutput.getCurrent() == 43.5;
     state.lengthCompensationActive = toolLengthCompOutput.getCurrent() != 49;
   }
 }, gFormat);
+
 function getOffsetCode() {
   if (!getSetting("outputToolLengthCompensation", true) && toolLengthCompOutput.isEnabled()) {
-    state.lengthCompensationActive = true;
-    // always assume that length compensation is active
+    state.lengthCompensationActive = true; // always assume that length compensation is active
     toolLengthCompOutput.disable();
   }
   var offsetCode = 43;
@@ -1931,75 +1894,5 @@ function getOffsetCode() {
   }
   return toolLengthCompOutput.format(offsetCode);
 }
-
-
-function onCycle() {
-  // Fusion 360 triggers this at the start of a cycle.
-  // We execute the logic per-point in onCyclePoint instead.
-}
-
-function onCyclePoint(x, y, z) {
-  // Check if this is a probing operation AND our property is enabled
-  if (cycleType && cycleType.indexOf("probing") !== -1 && getProperty("useVectorProbing")) {
-    
-    // 1. Calculate the true G-code Work Offset number (e.g. 1 = 54, 2 = 55)
-    var wcsValue = (currentWorkOffset > 0) ? (currentWorkOffset + 53) : 54;
-    var wcsP = wcsValue - 53; // for G10 L20 P1
-    
-    // 2. Extract Cycle Parameters from Fusion 360
-    var approach = cycle.probeClearance || 10;
-    var overtravel = cycle.probeOvertravel || 5;
-    var clearanceHeight = cycle.clearance || (z + 10);
-    var probeDepth = cycle.depth || 5;
-    var feed = cycle.feedrate || 200;
-    var probeRadius = tool.diameter / 2;
-    var xDim = cycle.width1 || 0;
-    var yDim = cycle.width2 || 0;
-
-    // 3. Move the probe to the start position safely
-    writeBlock(gMotionModal.format(0), xOutput.format(x), yOutput.format(y));
-    writeBlock(gMotionModal.format(0), zOutput.format(z));
-
-    // 4. Output the Universal Variables for your Macros
-    writeln("");
-    writeComment("--- PROBE MACRO VARS ---");
-    writeBlock("#<WorkOffset> = " + wcsValue);
-    writeBlock("#<Approach> = " + xyzFormat.format(approach));
-    writeBlock("#<Overtravel> = " + xyzFormat.format(overtravel));
-    writeBlock("#<ProbeRadius> = " + xyzFormat.format(probeRadius));
-    writeBlock("#<ProbeFeed> = " + feedFormat.format(feed));
-    writeBlock("#<Clearance_Height> = " + xyzFormat.format(clearanceHeight));
-    writeBlock("#<Height> = " + xyzFormat.format(probeDepth));
-    writeBlock("#<_XDimension> = " + xyzFormat.format(xDim));
-    writeBlock("#<_YDimension> = " + xyzFormat.format(yDim));
-    writeln("");
-
-    // 5. Fire the correct macro based on geometry
-    if (cycleType.indexOf("boss") !== -1 || cycleType.indexOf("outer") !== -1) {
-      writeComment("Execute External Boss/Web Macro");
-      writeBlock("$SD/Run=Probing/ProbeBoss.nc");
-    } 
-    else if (cycleType.indexOf("hole") !== -1 || cycleType.indexOf("pocket") !== -1 || cycleType.indexOf("inner") !== -1) {
-      writeComment("Execute Internal Hole/Pocket Macro");
-      writeBlock("$SD/Run=Probing/ProbeHole.nc");
-    } 
-    else if (cycleType === "probing-z") {
-      writeComment("Execute Z-Top Single Touch");
-      writeBlock("#<VecX>=0");
-      writeBlock("#<VecY>=0");
-      writeBlock("#<VecZ>=-1 * [" + xyzFormat.format(approach + overtravel) + "]");
-      writeBlock("$SD/Run=Probing/ProbeVector.nc");
-      writeBlock("G10 L20 P" + wcsP + " Z[#<_SurfaceZ> - #5063]");
-      writeBlock("$SD/Run=Probing/SyncETS.nc");
-      writeBlock("G90 G53 G0 Z0");
-    } 
-    else {
-      warning("Unsupported Vector Probing Cycle: " + cycleType + ". Use Boss, Hole, Web, Pocket, or Z.");
-    }
-    
-    return; // Exit here so it doesn't try to drill with the probe
-  }
-
-  // If NOT a probing operation (e.g., standard drilling), expand the cycle normally
-  expandCyclePoint(x, y, z);
-}
+// <<<<< INCLUDED FROM include_files/getOffsetCode_fanuc.cpi
+// <<<<< INCLUDED FROM ../common/grbl.cps
