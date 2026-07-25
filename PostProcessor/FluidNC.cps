@@ -1,19 +1,7 @@
-/**
-  Copyright (C) 2012-2024 by Autodesk, Inc.
-  All rights reserved.
-
-  Grbl post processor configuration.
-
-  $Revision: 44131 932990debebb6682fc2eeec860c18e6e6417efcb $
-  $Date: 2024-06-14 09:23:24 $
-
-  FORKID {154F7C00-6549-4c77-ADE0-79375FE5F2AA}
-*/
-
-description = "Grbl";
-vendor = "grbl";
-vendorUrl = "https://github.com/gnea/grbl/wiki";
-longDescription = "Generic milling post for Grbl. Use 'Split file' property to split files by tool for tool changes.";
+description = "FluidNC";
+vendor = "FluidNC";
+vendorUrl = "https://github.com/bdring/FluidNC";
+longDescription = "Generic milling post for FluidNC. This post is based on the Grbl post and has been modified to support FluidNC specific features.";
 
 // >>>>> INCLUDED FROM ../common/grbl.cps
 legal = "Copyright (C) 2012-2024 by Autodesk, Inc.";
@@ -46,7 +34,7 @@ properties = {
       {title:"G53", id:"G53"},
       {title:"Clearance Height", id:"clearanceHeight"}
     ],
-    value: "G28",
+    value: "G53",
     scope: "post"
   },
   showSequenceNumbers: {
@@ -83,7 +71,7 @@ properties = {
     description: "Adds spaces between words if 'yes' is selected.",
     group      : "formats",
     type       : "boolean",
-    value      : true,
+    value      : false,
     scope      : "post"
   },
   useToolCall: {
@@ -99,21 +87,16 @@ properties = {
     description: "Disable to disallow the output of M6 on tool changes.",
     group      : "preferences",
     type       : "boolean",
-    value      : false,
+    value      : true,
     scope      : "post"
   },
-  splitFile: {
-    title      : "Split file",
-    description: "Select your desired file splitting option.",
+  outputToolLengthCheck: {
+    title      : "Tool length check",
+    description: "'Yes' outputs the tool gauge length safety check (CheckToolGauge.nc) after every tool change. 'No' still outputs #<_fusion_tool_gauge> (used for a safe toolsetter approach on manual tools) but skips the verification/alarm call.",
     group      : "preferences",
-    type       : "enum",
-    values     : [
-      {title:"No splitting", id:"none"},
-      {title:"Split by tool", id:"tool"},
-      {title:"Split by toolpath", id:"toolpath"}
-    ],
-    value: "none",
-    scope: "post"
+    type       : "boolean",
+    value      : true,
+    scope      : "post"
   }
 };
 
@@ -124,8 +107,6 @@ wcsDefinitions = {
     {name:"Standard", format:"G", range:[54, 59]}
   ]
 };
-
-var subprograms = new Array();
 
 var gFormat = createFormat({prefix:"G", decimals:1});
 var mFormat = createFormat({prefix:"M", decimals:1});
@@ -239,11 +220,6 @@ function onOpen() {
   }
   writeProgramHeader();
 
-  if (getProperty("splitFile") != "none") {
-    writeComment(localize("***THIS FILE DOES NOT CONTAIN NC CODE***"));
-    return;
-  }
-
   // absolute coordinates and feed per min
   writeProgramStart();
   validateCommonParameters();
@@ -261,62 +237,18 @@ function onSection() {
   var forceSectionRestart = optionalSection && !currentSection.isOptional();
   optionalSection = currentSection.isOptional();
   var insertToolCall = isToolChangeNeeded("number") || forceSectionRestart;
-  var splitHere = getProperty("splitFile") == "toolpath" || (getProperty("splitFile") == "tool" && insertToolCall);
-  var newWorkOffset = isNewWorkOffset() || splitHere || forceSectionRestart;
-  var newWorkPlane = isNewWorkPlane() || splitHere || forceSectionRestart;
+  var newWorkOffset = isNewWorkOffset() || forceSectionRestart;
+  var newWorkPlane = isNewWorkPlane() || forceSectionRestart;
 
   if (insertToolCall || newWorkOffset || newWorkPlane) {
     // stop spindle before retract during tool change
-    if (insertToolCall && !isFirstSection() && !splitHere) {
+    if (insertToolCall && !isFirstSection()) {
       onCommand(COMMAND_STOP_SPINDLE);
     }
-    if (getProperty("splitFile") == "none") {
-      writeRetract(Z);
-    }
+    writeRetract(Z);
   }
   
   writeln("");
-
-  if (splitHere) {
-    if (!isFirstSection()) {
-      writeProgramEnd();
-    }
-
-    var subprogram;
-    if (getProperty("splitFile") == "toolpath") {
-      var comment;
-      if (hasParameter("operation-comment")) {
-        comment = getParameter("operation-comment");
-      } else {
-        comment = getCurrentSectionId();
-      }
-      subprogram = programName + "_" + (subprograms.length + 1) + "_" + comment + "_" + "T" + tool.number;
-    } else {
-      subprogram = programName + "_" + (subprograms.length + 1) + "_" + "T" + tool.number;
-    }
-
-    // var index = 0;
-    // var _subprogram = subprogram;
-    // while (subprograms.indexOf(_subprogram) !== -1) {
-    //   index++;
-    //   _subprogram = subprogram + "_" + index;
-    // }
-    // subprogram = _subprogram;
-    subprograms.push(subprogram);
-    var path = FileSystem.getCombinedPath(FileSystem.getFolderPath(getOutputPath()), String(subprogram).replace(/[<>:"/\\|?*]/g, "") + "." + extension);
-    writeComment(localize("Load tool number " + tool.number + " and subprogram " + subprogram));
-    redirectToFile(path);
-
-    if (programName) {
-      writeComment(programName);
-    }
-    if (programComment) {
-      writeComment(programComment);
-    }
-
-    // absolute coordinates and feed per min
-    writeProgramStart();
-  }
 
   writeComment(getParameter("operation-comment", ""));
 
@@ -327,7 +259,7 @@ function onSection() {
     }
     writeToolCall(tool, insertToolCall);
   }
-  startSpindle(tool, insertToolCall || splitHere);
+  startSpindle(tool, insertToolCall);
 
   // Output modal commands here
   writeBlock(gPlaneModal.format(17), gAbsIncModal.format(90), gFeedModeModal.format(94));
@@ -484,7 +416,7 @@ function onCommand(command) {
       writeToolBlock(mFormat.format(6));
     }
     writeComment(tool.comment);
-    if (tool.number != 100) {
+    if (tool.number != 100 && getProperty("outputToolLengthCheck")) {
       // Compares #<_fusion_tool_gauge> above against whatever the machine
       // has recorded (a mastered rack tool) or just measured (a manual
       // tool) for the tool now in the spindle -- see Macros/CheckToolGauge.nc
