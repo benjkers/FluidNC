@@ -50,7 +50,8 @@ namespace ATCs {
     public:
         void init() override;
         void probe_notification() override;
-        bool tool_change(tool_t value, bool pre_select, bool set_tool) override;
+        bool tool_change(tool_t value, bool pre_select, bool set_tool, bool master_gauge = false, bool has_manual_gauge = false,
+                         float manual_gauge_value = 0.0f) override;
 
         void validate() override {}
 

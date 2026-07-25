@@ -19,14 +19,36 @@ namespace Spindles {
                 data.msg[4] = 0x08;
                 data.msg[5] = 0x81;  // Stop command
                 log_info("Spindle Disabled");
-            } else {
+                return;
+            }
+
                 data.msg[4] = 0x08;
                 data.msg[5] = 0x82;  // Enable command (Start Drive)
                 log_info("Spindle Enabled in " << (_is_Ccw ? "CCW" : "CW") << " mode");
-                // Re-send speed if direction has changed without speed command
+
                 if (_is_Ccw != was_ccw) {
-                    log_info("Direction changed. Re-sending speed with updated direction.");
-                    set_speed_command(last_speed, data);  // Re-send last speed with new direction
+                // Direction changed. The enable command above doesn't carry
+                // direction -- only the SIGN of the speed register does, so
+                // the drive needs a speed write with the corrected sign to
+                // actually reverse. We can only build one Modbus message per
+                // callback, and `data` here is already committed to the
+                // enable command above, so queue the corrected-sign speed
+                // write as its own, separate, follow-up transaction rather
+                // than overwriting `data` (which used to silently discard
+                // the enable command -- meaning the drive never actually
+                // saw a fresh Start command on a direction reversal, and if
+                // the reversal happened at the same commanded RPM, no
+                // separate speed command would have been queued elsewhere
+                // to correct the sign either).
+                log_info("Direction changed. Queuing corrected-sign speed resend.");
+                if (vfd_cmd_queue) {
+                    VFDaction action;
+                    action.action   = actionSetSpeed;
+                    action.arg      = last_speed;
+                    action.critical = false;
+                    if (xQueueSend(vfd_cmd_queue, &action, 0) != pdTRUE) {
+                        log_info("VFD Queue Full, could not queue corrected-direction speed resend");
+                    }
                 }
             }
         }

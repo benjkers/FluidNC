@@ -469,6 +469,12 @@ function onCommand(command) {
     writeBlock(sOutput.format(spindleSpeed), mFormat.format(tool.clockwise ? 3 : 4));
     return;
   case COMMAND_LOAD_TOOL:
+    // T100 is the known-gauge-length reference/calibration tool -- it
+    // doesn't have a comparable "expected" gauge length from Fusion in the
+    // same sense as a real cutting tool, so it's excluded here.
+    if (tool.number != 100) {
+      writeBlock("#<_fusion_tool_gauge>=" + xyzFormat.format(getBodyLength(tool)));
+    }
     if (getProperty("useToolCall")) {
       writeToolBlock("T" + toolFormat.format(tool.number), conditional(getProperty("useM06"), mFormat.format(6)));
       if (!isFirstSection() && !getProperty("useM06")) {
@@ -478,6 +484,12 @@ function onCommand(command) {
       writeToolBlock(mFormat.format(6));
     }
     writeComment(tool.comment);
+    if (tool.number != 100) {
+      // Compares #<_fusion_tool_gauge> above against whatever the machine
+      // has recorded (a mastered rack tool) or just measured (a manual
+      // tool) for the tool now in the spindle -- see Macros/CheckToolGauge.nc
+      writeBlock("$SD/Run=CheckToolGauge.nc");
+    }
     return;
   case COMMAND_LOCK_MULTI_AXIS:
     if (machineConfiguration.isMultiAxisConfiguration()) {

@@ -49,9 +49,16 @@ namespace ATCs {
 
     void Manual_ATC::probe_notification() {}
 
-    bool Manual_ATC::tool_change(tool_t new_tool, bool pre_select, bool set_tool) {
+    bool Manual_ATC::tool_change(tool_t new_tool, bool pre_select, bool set_tool, bool master_gauge, bool has_manual_gauge,
+                                  float manual_gauge_value) {
         bool spindle_was_on = false;  // used to restore the spindle state
         bool was_inch_mode  = false;  // allows use to restore inch mode if req'd
+
+        if (master_gauge) {
+            // Manual_ATC has no rack, so there is nothing to (re)master.
+            log_info("Manual_ATC:" << name() << " has no rack tools to master, ignoring M101");
+            return true;
+        }
 
         protocol_buffer_synchronize();  // wait for all motion to complete
         _macro.erase();                 // clear previous gcode

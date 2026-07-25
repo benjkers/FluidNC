@@ -11,7 +11,13 @@ M62 P1
 G4 P1
 G53 G38.2 Z[#<_etsz>] F50
 M63 P1
-#<_tool_break_check>=[ABS[#5063-#<_ets_tool_first_z>-#<_my_tlo_z >]]
+(Compares this fresh probe reading to the raw toolsetter-trigger Z we)
+(EXPECT for whatever tool is currently in the spindle -- see)
+(atc_custom.cpp's #<_current_tool_probe_z>. Both are raw machine-Z)
+(readings, so no further gauge-length math is needed here. Note this is)
+(different from #<_current_tool_gauge>, which is an absolute physical)
+(gauge length used by ProbeZSetZero.nc/SetZZero.nc, not a machine Z.)
+#<_tool_break_check>=[ABS[#5063-#<_current_tool_probe_z>]]
 D#<_tool_break_check>
 o100 if [#<_tool_break_check> GT 0.2]
     G53G0Z0

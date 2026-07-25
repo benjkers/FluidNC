@@ -6,7 +6,7 @@ namespace Spindles {
     namespace VFD {
         class CumarkProtocol : public VFDProtocol {
         protected:
-            bool _is_Ccw; 
+            bool _is_Ccw = false;
             uint32_t last_speed;  // Store the last speed set
             int16_t speed;
             int16_t _maxSpeed=18000;

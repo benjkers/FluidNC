@@ -1008,7 +1008,11 @@ static Error list_parameters(const char* value, AuthenticationLevel auth_level, 
 // That action could be anything, from displaying a run-time parameter
 // to performing some system state change.  Each command is responsible
 // for decoding its own value string, if it needs one.
+// Implemented in ToolChangers/atc_custom.cpp
+extern Error atc_save_gauge_command(const char* value, AuthenticationLevel auth_level, Channel& out);
+
 void make_user_commands() {
+    new UserCommand(NULL, "ATC/SaveGauge", atc_save_gauge_command, anyState);
     new UserCommand("GD", "GPIO/Dump", showGPIOs, anyState);
     new UserCommand("GI", "GPIO/Input", setGPIOInput, anyState);
     new UserCommand("GO", "GPIO/Output", setGPIOOutput, anyState);

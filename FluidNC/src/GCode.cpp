@@ -55,6 +55,7 @@ gc_modal_t modal_defaults = {
     SpindleState::Disable,
     ToolChange::Disable,
     SetToolNumber::Disable,
+    MasterGauge::Disable,
     IoControl::None,
     Override::ParkingMotion
 };
@@ -281,6 +282,7 @@ Error gc_execute_line(const char* input_line) {
     bool laserIsMotion        = false;
     bool nonmodalG38          = false;  // Used for G38.6-9
     bool isWaitOnInputDigital = false;
+    bool masterGaugeHasQ      = false;  // M101 Tn Qvalue - was Q provided?
 
     auto    n_axis = Axes::_numberAxis;
     float   coord_data[MAX_N_AXIS];  // Used by WCO-related commands
@@ -739,6 +741,10 @@ Error gc_execute_line(const char* input_line) {
                         gc_block.modal.io_control = IoControl::SetAnalogImmediate;
                         mg_word_bit               = ModalGroup::MM5;
                         break;
+                    case 101:  // M101 Tn - (re)master an ATC rack tool's gauge length
+                        gc_block.modal.master_gauge = MasterGauge::Enable;
+                        mg_word_bit                 = ModalGroup::MM10;
+                        break;
                     default:
                         return Error::GcodeUnsupportedCommand;  // [Unsupported M command]
                 }
@@ -1112,6 +1118,15 @@ Error gc_execute_line(const char* input_line) {
             return Error::GcodeValueWordMissing;
         }
         clear_bitnum(value_words, GCodeWord::Q);
+    }
+    if (gc_block.modal.master_gauge == MasterGauge::Enable) {
+        // M101 Tn [Qvalue] - Q is optional: if present, directly set the
+        // gauge length instead of re-probing (the only way to set T1's,
+        // the probe's, since it can't be measured on the toolsetter).
+        if (bitnum_is_true(value_words, GCodeWord::Q)) {
+            masterGaugeHasQ = true;
+            clear_bitnum(value_words, GCodeWord::Q);
+        }
     }
 
     // [11. Set active plane ]: N/A
@@ -1699,6 +1714,13 @@ Error gc_execute_line(const char* input_line) {
         report_ovr_counter    = 0;  // Set to report change immediately
         gc_ovr_changed();
         
+    }
+
+    if (gc_block.modal.master_gauge == MasterGauge::Enable) {  // M101 Tn [Qvalue]
+        protocol_buffer_synchronize();  // wait for motion in buffer to finish
+        spindle->tool_change(gc_state.selected_tool, false, false, true, masterGaugeHasQ, gc_block.values.q);
+        report_ovr_counter = 0;  // Set to report change immediately
+        gc_ovr_changed();
     }
 
     // [7. Spindle control ]:

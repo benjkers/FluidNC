@@ -19,6 +19,12 @@ bool named_param_exists(std::string& name);
 bool set_named_param(const char* name, float value);
 bool set_numbered_param(ngc_param_id_t, float value);
 
+// Read back a global (underscore-prefixed) named parameter that was set by
+// gcode, e.g. from within a running macro. Used by modules that need to
+// bridge a value computed in gcode back into C++, since macros run
+// asynchronously relative to the C++ code that queued them.
+bool get_global_named_param(const std::string& name, float& value);
+
 // Forward declarations
 class Channel;
 

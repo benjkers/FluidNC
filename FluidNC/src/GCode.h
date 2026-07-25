@@ -201,6 +201,12 @@ enum class BreakDetection : bool {
     Disable = 0,
     Enable  = 1,
 };
+// M101 Tn - (re)master an ATC rack tool's gauge length. Part of the
+// M100-M199 "user defined" range (Modal Group MM10).
+enum class MasterGauge : bool {
+    Disable = 0,
+    Enable  = 1,
+};
 // Modal Group G12: Active work coordinate system
 // N/A: Stores coordinate system value (54-59) to change to.
 
@@ -279,6 +285,7 @@ struct gc_modal_t {
     SpindleState  spindle;       // {M3,M4,M5}
     ToolChange    tool_change;   // {M6}
     SetToolNumber set_tool_number;
+    MasterGauge   master_gauge;  // {M101}
     IoControl     io_control;  // {M62, M63, M67}
     Override      override;    // {M56}
 };
