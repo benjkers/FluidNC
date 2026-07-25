@@ -443,6 +443,12 @@ function onCommand(command) {
       writeBlock("$SD/Run=BreakDetection.nc")
     return;
   case COMMAND_TOOL_MEASURE:
+     // Fires from a Manual NC "Measure Tool" step in the Fusion timeline.
+    // Re-probes/re-stores the gauge length of whatever tool is currently
+    // in the spindle -- a no-op (with a logged error) if it's not a rack
+    // tool or isn't the tool actually loaded. See atc_custom.cpp's M101.
+    writeBlock("M101 T" + toolFormat.format(tool.number));
+    writeComment(localize("MEASURE TOOL " + tool.number));
     return;
   }
 
