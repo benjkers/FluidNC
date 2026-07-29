@@ -201,6 +201,13 @@ enum class BreakDetection : bool {
     Disable = 0,
     Enable  = 1,
 };
+// M52 Pn - LinuxCNC-style adaptive feed control enable/disable. Shares
+// Modal Group MM9 ("Override control") with M56, per the NIST RS274NGC
+// spec's own grouping of override-related M-codes.
+enum class AdaptiveFeed : bool {
+    Disable = 0,
+    Enable  = 1,
+};
 // Modal Group G12: Active work coordinate system
 // N/A: Stores coordinate system value (54-59) to change to.
 
@@ -279,6 +286,7 @@ struct gc_modal_t {
     SpindleState  spindle;       // {M3,M4,M5}
     ToolChange    tool_change;   // {M6}
     SetToolNumber set_tool_number;
+    AdaptiveFeed  adaptive_feed;  // {M52}
     IoControl     io_control;  // {M62, M63, M67}
     Override      override;    // {M56}
 };

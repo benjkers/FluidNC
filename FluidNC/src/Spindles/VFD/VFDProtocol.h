@@ -41,9 +41,16 @@ namespace Spindles {
             virtual response_parser get_status_ok(ModbusCommand& data) = 0;
             virtual bool            safety_polling() const { return true; }
 
-        private:
-            friend class Spindles::VFDSpindle;  // For ISR related things.
+            // M52 Pn - adaptive feed control enable/disable. Default is a
+            // no-op; only protocols that implement load-based throttling
+            // (e.g. CumarkProtocol) need to override this.
+            virtual void set_adaptive_feed(bool enable) {}
 
+            // Protected (not private) so a protocol subclass can enqueue a
+            // follow-up action from within one of its own callbacks (e.g.
+            // CumarkProtocol::direction_command() queuing a corrected-sign
+            // speed resend after a direction change, since only one Modbus
+            // transaction can be built per callback invocation).
             enum VFDactionType : uint8_t { actionSetSpeed, actionSetMode };
 
             struct VFDaction {
@@ -51,6 +58,11 @@ namespace Spindles {
                 bool          critical;
                 uint32_t      arg;
             };
+
+            static QueueHandle_t vfd_cmd_queue;
+
+        private:
+            friend class Spindles::VFDSpindle;  // For ISR related things.
 
             // Careful observers will notice that these *shouldn't* be static, but they are. The reason is
             // hard to track down. In the spindle class, you can find:
@@ -60,7 +72,6 @@ namespace Spindles {
             // With init being called multiple times, static suddenly makes more sense - especially since there is
             // no de-init. Oh well...
 
-            static QueueHandle_t vfd_cmd_queue;
             static TaskHandle_t  vfd_cmdTaskHandle;
             static void          vfd_cmd_task(void* pvParameters);
 

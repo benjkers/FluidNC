@@ -53,6 +53,12 @@ namespace Spindles {
 
         void init() override;
         void config_message() override;
+        // Forwards to the protocol implementation (e.g. CumarkProtocol) --
+        // protocols that don't override this just get the base no-op.
+        // Implemented in VFDSpindle.cpp: VFDProtocol is only forward-
+        // declared here, so detail_->set_adaptive_feed() can't be called
+        // inline in this header.
+        void set_adaptive_feed(bool enable) override;
         void setState(SpindleState state, SpindleSpeed speed) override;
         void setSpeedfromISR(uint32_t dev_speed) override;
 

@@ -55,6 +55,7 @@ gc_modal_t modal_defaults = {
     SpindleState::Disable,
     ToolChange::Disable,
     SetToolNumber::Disable,
+    AdaptiveFeed::Disable,
     IoControl::None,
     Override::ParkingMotion
 };
@@ -281,6 +282,7 @@ Error gc_execute_line(const char* input_line) {
     bool laserIsMotion        = false;
     bool nonmodalG38          = false;  // Used for G38.6-9
     bool isWaitOnInputDigital = false;
+    bool sawAdaptiveFeedWord  = false;  // M52 Pn - was M52 present on this line?
 
     auto    n_axis = Axes::_numberAxis;
     float   coord_data[MAX_N_AXIS];  // Used by WCO-related commands
@@ -699,6 +701,16 @@ Error gc_execute_line(const char* input_line) {
                         }
                         mg_word_bit = ModalGroup::MM8;
                         break;
+                    case 52:  // M52 Pn - adaptive feed control enable/disable (LinuxCNC-style)
+                        // NOTE: don't touch gc_block.values.p here -- P
+                        // appears AFTER "M52" in the line text, so it
+                        // hasn't been parsed yet at this point in the
+                        // single-pass parser. The actual value is read
+                        // later, once the whole line has been parsed (see
+                        // sawAdaptiveFeedWord below).
+                        sawAdaptiveFeedWord = true;
+                        mg_word_bit         = ModalGroup::MM9;
+                        break;
                     case 56:
                         if (config->_enableParkingOverrideControl) {
                             gc_block.modal.override = Override::ParkingMotion;
@@ -1112,6 +1124,13 @@ Error gc_execute_line(const char* input_line) {
             return Error::GcodeValueWordMissing;
         }
         clear_bitnum(value_words, GCodeWord::Q);
+    }
+    if (sawAdaptiveFeedWord) {  // M52 Pn -- P is required, read now that the whole line is parsed
+        if (bitnum_is_false(value_words, GCodeWord::P)) {
+            return Error::GcodeValueWordMissing;
+        }
+        clear_bitnum(value_words, GCodeWord::P);
+        gc_block.modal.adaptive_feed = (gc_block.values.p != 0) ? AdaptiveFeed::Enable : AdaptiveFeed::Disable;
     }
 
     // [11. Set active plane ]: N/A
@@ -1699,6 +1718,19 @@ Error gc_execute_line(const char* input_line) {
         report_ovr_counter    = 0;  // Set to report change immediately
         gc_ovr_changed();
         
+    }
+
+    if (gc_block.modal.adaptive_feed != gc_state.modal.adaptive_feed) {  // M52 Pn
+        gc_state.modal.adaptive_feed = gc_block.modal.adaptive_feed;
+        bool enabled                 = gc_state.modal.adaptive_feed == AdaptiveFeed::Enable;
+        spindle->set_adaptive_feed(enabled);
+        if (!enabled) {
+            // Give control back to the operator immediately rather than
+            // leaving whatever override an adaptive-feed protocol (e.g.
+            // CumarkProtocol) last applied in place.
+            sys.set_f_override(FeedOverride::Default);
+        }
+        log_info("Adaptive feed control " << (enabled ? "enabled" : "disabled"));
     }
 
     // [7. Spindle control ]:

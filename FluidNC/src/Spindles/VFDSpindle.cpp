@@ -36,6 +36,12 @@ namespace Spindles {
 
     // ================== Class methods ==================================
 
+    void VFDSpindle::set_adaptive_feed(bool enable) {
+        if (detail_) {
+            detail_->set_adaptive_feed(enable);
+        }
+    }
+
     void VFDSpindle::init() {
         _sync_dev_speed = 0;
         _syncing        = false;

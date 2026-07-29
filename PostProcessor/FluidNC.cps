@@ -34,6 +34,19 @@ maximumCircularSweep = toRad(180);
 allowHelicalMoves = true;
 allowedCircularPlanes = undefined; // allow any circular motion
 
+// Per-operation post options -- shows up as a "Post Process" tab in each
+// operation's own dialog (distinct from the global properties below).
+// Requires the CAM setup to use a Machine Configuration with this post
+// assigned to it -- if this tab doesn't appear, that's almost always why.
+operationProperties = {
+  useAdaptiveFeed: {
+    title      : "Adaptive feed control",
+    description: "Enable torque-based adaptive feed control (M52) for this specific operation. Lets you turn it off for e.g. finishing passes or probing while leaving it on for roughing.",
+    type       : "boolean",
+    value      : true
+  }
+};
+
 // user-defined properties
 properties = {
   safePositionMethod: {
@@ -46,7 +59,7 @@ properties = {
       {title:"G53", id:"G53"},
       {title:"Clearance Height", id:"clearanceHeight"}
     ],
-    value: "G28",
+    value: "G53",
     scope: "post"
   },
   showSequenceNumbers: {
@@ -83,7 +96,7 @@ properties = {
     description: "Adds spaces between words if 'yes' is selected.",
     group      : "formats",
     type       : "boolean",
-    value      : true,
+    value      : false,
     scope      : "post"
   },
   useToolCall: {
@@ -99,21 +112,16 @@ properties = {
     description: "Disable to disallow the output of M6 on tool changes.",
     group      : "preferences",
     type       : "boolean",
-    value      : false,
+    value      : true,
     scope      : "post"
   },
-  splitFile: {
-    title      : "Split file",
-    description: "Select your desired file splitting option.",
+  outputToolLengthCheck: {
+    title      : "Tool length check",
+    description: "'Yes' outputs the tool gauge length safety check (CheckToolGauge.nc) after every tool change. 'No' still outputs #<_fusion_tool_gauge> (used for a safe toolsetter approach on manual tools) but skips the verification/alarm call.",
     group      : "preferences",
-    type       : "enum",
-    values     : [
-      {title:"No splitting", id:"none"},
-      {title:"Split by tool", id:"tool"},
-      {title:"Split by toolpath", id:"toolpath"}
-    ],
-    value: "none",
-    scope: "post"
+    type       : "boolean",
+    value      : true,
+    scope      : "post"
   }
 };
 
@@ -124,8 +132,6 @@ wcsDefinitions = {
     {name:"Standard", format:"G", range:[54, 59]}
   ]
 };
-
-var subprograms = new Array();
 
 var gFormat = createFormat({prefix:"G", decimals:1});
 var mFormat = createFormat({prefix:"M", decimals:1});
@@ -239,11 +245,6 @@ function onOpen() {
   }
   writeProgramHeader();
 
-  if (getProperty("splitFile") != "none") {
-    writeComment(localize("***THIS FILE DOES NOT CONTAIN NC CODE***"));
-    return;
-  }
-
   // absolute coordinates and feed per min
   writeProgramStart();
   validateCommonParameters();
@@ -261,62 +262,18 @@ function onSection() {
   var forceSectionRestart = optionalSection && !currentSection.isOptional();
   optionalSection = currentSection.isOptional();
   var insertToolCall = isToolChangeNeeded("number") || forceSectionRestart;
-  var splitHere = getProperty("splitFile") == "toolpath" || (getProperty("splitFile") == "tool" && insertToolCall);
-  var newWorkOffset = isNewWorkOffset() || splitHere || forceSectionRestart;
-  var newWorkPlane = isNewWorkPlane() || splitHere || forceSectionRestart;
+  var newWorkOffset = isNewWorkOffset() || forceSectionRestart;
+  var newWorkPlane = isNewWorkPlane() || forceSectionRestart;
 
   if (insertToolCall || newWorkOffset || newWorkPlane) {
     // stop spindle before retract during tool change
-    if (insertToolCall && !isFirstSection() && !splitHere) {
+    if (insertToolCall && !isFirstSection()) {
       onCommand(COMMAND_STOP_SPINDLE);
     }
-    if (getProperty("splitFile") == "none") {
-      writeRetract(Z);
-    }
+    writeRetract(Z);
   }
   
   writeln("");
-
-  if (splitHere) {
-    if (!isFirstSection()) {
-      writeProgramEnd();
-    }
-
-    var subprogram;
-    if (getProperty("splitFile") == "toolpath") {
-      var comment;
-      if (hasParameter("operation-comment")) {
-        comment = getParameter("operation-comment");
-      } else {
-        comment = getCurrentSectionId();
-      }
-      subprogram = programName + "_" + (subprograms.length + 1) + "_" + comment + "_" + "T" + tool.number;
-    } else {
-      subprogram = programName + "_" + (subprograms.length + 1) + "_" + "T" + tool.number;
-    }
-
-    // var index = 0;
-    // var _subprogram = subprogram;
-    // while (subprograms.indexOf(_subprogram) !== -1) {
-    //   index++;
-    //   _subprogram = subprogram + "_" + index;
-    // }
-    // subprogram = _subprogram;
-    subprograms.push(subprogram);
-    var path = FileSystem.getCombinedPath(FileSystem.getFolderPath(getOutputPath()), String(subprogram).replace(/[<>:"/\\|?*]/g, "") + "." + extension);
-    writeComment(localize("Load tool number " + tool.number + " and subprogram " + subprogram));
-    redirectToFile(path);
-
-    if (programName) {
-      writeComment(programName);
-    }
-    if (programComment) {
-      writeComment(programComment);
-    }
-
-    // absolute coordinates and feed per min
-    writeProgramStart();
-  }
 
   writeComment(getParameter("operation-comment", ""));
 
@@ -327,7 +284,17 @@ function onSection() {
     }
     writeToolCall(tool, insertToolCall);
   }
-  startSpindle(tool, insertToolCall || splitHere);
+  startSpindle(tool, insertToolCall);
+
+  // Adaptive feed control (M52) -- per-operation toggle, see
+  // operationProperties.useAdaptiveFeed above. Only emitted when the
+  // desired state actually differs from the last one written, so we don't
+  // spam M52 on every single operation.
+  var wantAdaptiveFeed = currentSection.properties.useAdaptiveFeed ? true : false;
+  if (lastAdaptiveFeedState === undefined || wantAdaptiveFeed != lastAdaptiveFeedState) {
+    writeBlock("M52 P" + (wantAdaptiveFeed ? 1 : 0));
+    lastAdaptiveFeedState = wantAdaptiveFeed;
+  }
 
   // Output modal commands here
   writeBlock(gPlaneModal.format(17), gAbsIncModal.format(90), gFeedModeModal.format(94));
@@ -361,6 +328,99 @@ function onDwell(seconds) {
 
 function onSpindleSpeed(spindleSpeed) {
   writeBlock(sOutput.format(spindleSpeed));
+}
+
+// ---------------------------------------------------------------------
+// Native Fusion probing cycles (Setup > Probe / Probe toolpaths)
+//
+// Fusion posts these through onCyclePoint(x, y, z) with the cycle type in
+// the global `cycleType`/`cycle` object. Anything we don't explicitly
+// handle here falls through to expandCyclePoint(), same as normal
+// drilling cycles (FluidNC has no native canned cycles, so those are
+// already expanded into plain moves -- this is the same mechanism).
+//
+// The actual probe motion + math lives in Macros/Probe*Edge.nc /
+// ProbeZSurface.nc on the SD card, not here -- this function just sets
+// the named parameters those macros expect and calls them via $SD/Run=.
+// Currently implemented: probing-x, probing-y, probing-z,
+// probing-xy-outer-corner, probing-xy-inner-corner.
+// ---------------------------------------------------------------------
+
+// Captured via onParameter below -- Fusion's "probe measure" feed rate,
+// used for the second (accurate) touch. Falls back to a fraction of the
+// cycle's normal probe feed if the operation didn't set one.
+var probeFeedSlow = undefined;
+
+function onParameter(name, value) {
+  if (name == "operation:tool_feedProbeMeasure") {
+    probeFeedSlow = value;
+  }
+}
+
+function probeAxisEdge(axis, dir) {
+  var slowFeed = probeFeedSlow ? probeFeedSlow : cycle.feedrate / 4;
+  writeBlock("#<_probe_axis_dir>=" + dir);
+  writeBlock("#<_probe_clearance>=" + xyzFormat.format(cycle.probeClearance));
+  writeBlock("#<_probe_overtravel>=" + xyzFormat.format(cycle.probeOvertravel));
+  writeBlock("#<_probe_feed_fast>=" + feedFormat.format(cycle.feedrate));
+  writeBlock("#<_probe_feed_slow>=" + feedFormat.format(slowFeed));
+  writeBlock("#<_probe_tool_radius>=" + xyzFormat.format(tool.diameter / 2));
+  writeBlock("$SD/Run=Probe" + axis + "Edge.nc");
+}
+
+function probeZSurface() {
+  var slowFeed = probeFeedSlow ? probeFeedSlow : cycle.feedrate / 4;
+  var clearance = (cycle.clearance !== undefined) ? cycle.clearance : cycle.probeClearance;
+  writeBlock("#<_probe_clearance>=" + xyzFormat.format(clearance));
+  writeBlock("#<_probe_overtravel>=" + xyzFormat.format(cycle.probeOvertravel));
+  writeBlock("#<_probe_feed_fast>=" + feedFormat.format(cycle.feedrate));
+  writeBlock("#<_probe_feed_slow>=" + feedFormat.format(slowFeed));
+  writeBlock("$SD/Run=ProbeZSurface.nc");
+}
+
+function onCyclePoint(x, y, z) {
+  if (!isProbeOperation()) {
+    expandCyclePoint(x, y, z);
+    return;
+  }
+
+  switch (cycleType) {
+  case "probing-x":
+    writeComment("Probing X edge");
+    probeAxisEdge("X", (cycle.approach1 == "positive") ? 1 : -1);
+    break;
+  case "probing-y":
+    writeComment("Probing Y edge");
+    probeAxisEdge("Y", (cycle.approach1 == "positive") ? 1 : -1);
+    break;
+  case "probing-z":
+    writeComment("Probing Z surface");
+    probeZSurface();
+    break;
+  case "probing-xy-outer-corner":
+  case "probing-xy-inner-corner":
+    // Two single-axis touches: reposition to be aligned with the corner
+    // on one axis, offset by the standoff on the other, probe X; then
+    // the mirror image for Y. This is the part of native probing most
+    // worth double-checking in Fusion's simulation before cutting --
+    // the exact approach-point geometry Fusion assumes isn't something
+    // I could verify against a real Fusion session.
+    writeComment("Probing XY corner (" + cycleType + ")");
+    var dirX = (cycle.approach1 == "positive") ? 1 : -1;
+    var dirY = (cycle.approach2 == "positive") ? 1 : -1;
+    var standoff = cycle.probeClearance + tool.diameter / 2;
+    writeBlock(gMotionModal.format(0), xOutput.format(x - dirX * standoff), yOutput.format(y));
+    probeAxisEdge("X", dirX);
+    writeBlock(gMotionModal.format(0), xOutput.format(x), yOutput.format(y - dirY * standoff));
+    probeAxisEdge("Y", dirY);
+    writeComment("XY corner probed");
+    break;
+  default:
+    var msg = "Probe cycle '" + cycleType + "' is not implemented in this post -- skipping.";
+    writeComment(msg);
+    warning(msg);
+    break;
+  }
 }
 
 function forceCircular(plane) {
@@ -469,6 +529,12 @@ function onCommand(command) {
     writeBlock(sOutput.format(spindleSpeed), mFormat.format(tool.clockwise ? 3 : 4));
     return;
   case COMMAND_LOAD_TOOL:
+    // T100 is the known-gauge-length reference/calibration tool -- it
+    // doesn't have a comparable "expected" gauge length from Fusion in the
+    // same sense as a real cutting tool, so it's excluded here.
+    if (tool.number != 100) {
+      writeBlock("#<_fusion_tool_gauge>=" + xyzFormat.format(getBodyLength(tool)));
+    }
     if (getProperty("useToolCall")) {
       writeToolBlock("T" + toolFormat.format(tool.number), conditional(getProperty("useM06"), mFormat.format(6)));
       if (!isFirstSection() && !getProperty("useM06")) {
@@ -478,6 +544,12 @@ function onCommand(command) {
       writeToolBlock(mFormat.format(6));
     }
     writeComment(tool.comment);
+    if (tool.number != 100 && getProperty("outputToolLengthCheck")) {
+      // Compares #<_fusion_tool_gauge> above against whatever the machine
+      // has recorded (a mastered rack tool) or just measured (a manual
+      // tool) for the tool now in the spindle -- see Macros/CheckToolGauge.nc
+      writeBlock("$SD/Run=CheckToolGauge.nc");
+    }
     return;
   case COMMAND_LOCK_MULTI_AXIS:
     if (machineConfiguration.isMultiAxisConfiguration()) {
@@ -499,6 +571,11 @@ function onCommand(command) {
       writeBlock("$SD/Run=BreakDetection.nc")
     return;
   case COMMAND_TOOL_MEASURE:
+    // Fires from a Manual NC "Measure Tool" step in the Fusion timeline.
+    // Re-probes/re-stores the gauge length of whatever tool is currently
+    // in the spindle -- a no-op (with a logged error) if it's not a rack
+    // tool or isn't the tool actually loaded. See atc_custom.cpp's M101.
+    writeBlock("M101 T" + toolFormat.format(tool.number));
     return;
   }
 
@@ -581,6 +658,12 @@ function writeProgramEnd() {
 
 function onClose() {
   optionalSection = false;
+  if (lastAdaptiveFeedState) {
+    // Don't leave adaptive feed control active for whatever runs after
+    // this job (manual MDI moves, the next unrelated program, etc.).
+    writeBlock("M52 P0");
+    lastAdaptiveFeedState = false;
+  }
   writeln("");
   writeProgramEnd();
 }
@@ -602,6 +685,7 @@ var validateLengthCompensation = getSetting("outputToolLengthCompensation", true
 var multiAxisFeedrate;
 var sequenceNumber;
 var optionalSection = false;
+var lastAdaptiveFeedState = undefined;  // tracks the last M52 state actually written, so we only emit it on change
 var currentWorkOffset;
 var forceSpindleSpeed = false;
 var operationNeedsSafeStart = false; // used to convert blocks to optional for safeStartAllOperations
