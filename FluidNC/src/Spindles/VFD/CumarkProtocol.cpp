@@ -12,14 +12,12 @@ namespace Spindles {
             bool was_ccw = _is_Ccw;
             _is_Ccw = (mode == SpindleState::Ccw);
 
-            data.tx_length = 6;
-            data.rx_length = 6;
-
-            data.msg[1] = 0x06;  // Function code for writing a single register
-            data.msg[2] = 0x00;  // Register address high byte 
-            data.msg[3] = 0x01;  // Register address low byte 
-
             if (mode == SpindleState::Disable) {
+                data.tx_length = 6;
+                data.rx_length = 6;
+                data.msg[1] = 0x06;  // Function code: Write Single Register
+                data.msg[2] = 0x00;  // Register address high byte
+                data.msg[3] = 0x01;  // Register address low byte
                 data.msg[4] = 0x08;
                 data.msg[5] = 0x81;  // Stop command
                 log_info("Spindle Disabled");
@@ -31,29 +29,24 @@ namespace Spindles {
             if (direction_changed) {
                 // This drive does NOT appear to honor a live sign change on
                 // the speed register while already running -- it needs to
-                // see a genuine stop, then a fresh speed write with the
-                // corrected sign, then a fresh start, to actually reverse.
-                // (An earlier version of this fix only re-sent the speed
-                // value, which turned out not to be enough in practice.)
-                //
-                // This callback's own output is the STOP command; the
-                // corrected-sign speed and the restart are queued as two
-                // separate follow-up transactions, since only one Modbus
-                // message can be built per callback invocation.
+                // see a genuine stop, then a fresh start with the
+                // corrected sign, to actually reverse. This callback's own
+                // output is the STOP; the restart is queued as a single
+                // follow-up transaction, since only one Modbus message can
+                // be built per callback invocation. That follow-up lands
+                // back in this same function (direction_changed will be
+                // false by then) and falls through to the combined
+                // start+speed write below.
+                data.tx_length = 6;
+                data.rx_length = 6;
+                data.msg[1] = 0x06;
+                data.msg[2] = 0x00;
+                data.msg[3] = 0x01;
                 data.msg[4] = 0x08;
                 data.msg[5] = 0x81;  // Stop
-                log_warn("CumarkProtocol: direction changed to " << (_is_Ccw ? "CCW" : "CW")
-                                                                   << " -- stopping before reversing (queuing speed + restart)");
+                log_warn("CumarkProtocol: direction changed to " << (_is_Ccw ? "CCW" : "CW") << " -- stopping before reversing");
 
                 if (vfd_cmd_queue) {
-                    VFDaction speed_action;
-                    speed_action.action   = actionSetSpeed;
-                    speed_action.arg      = last_speed;
-                    speed_action.critical = false;
-                    if (xQueueSend(vfd_cmd_queue, &speed_action, 0) != pdTRUE) {
-                        log_warn("CumarkProtocol: VFD queue full, could not queue corrected-direction speed resend");
-                    }
-
                     VFDaction start_action;
                     start_action.action   = actionSetMode;
                     start_action.arg      = uint32_t(mode);
@@ -65,9 +58,43 @@ namespace Spindles {
                 return;
             }
 
-            data.msg[4] = 0x08;
-            data.msg[5] = 0x82;  // Enable command (Start Drive)
-            log_info("Spindle Enabled in " << (_is_Ccw ? "CCW" : "CW") << " mode");
+            // Combined Start + correctly-signed Speed, written together in
+            // ONE Modbus transaction (function code 0x10, "Write Multiple
+            // Registers", covering 0x0001-0x0002). This is the key piece:
+            // it means the corrected-sign speed always accompanies the
+            // start command, so this never goes through the framework's
+            // queued actionSetSpeed path at all -- and therefore never
+            // hits VFDProtocol::prepareSetSpeedCommand()'s "don't resend
+            // the same speed twice" guard, which doesn't know about
+            // direction and was silently swallowing an earlier version of
+            // this fix (confirmed via debug log: no "set_speed_command
+            // called" line ever appeared for a same-RPM reversal before).
+            // This keeps the whole fix inside this file -- no
+            // VFDProtocol.h/.cpp changes needed.
+            //
+            // NOTE: 0x10 is confirmed supported by this drive (see the
+            // function code table in the manual), but I could not find a
+            // byte-level worked example for it specifically to check
+            // against, unlike 0x03/0x06 -- the framing below follows the
+            // standard Modbus RTU spec for this function code. Worth
+            // testing carefully.
+            int32_t effective_speed = _is_Ccw ? -static_cast<int32_t>(last_speed) : static_cast<int32_t>(last_speed);
+
+            data.tx_length = 11;  // addr + func + start_hi + start_lo + qty_hi + qty_lo + byte_count + 4 data bytes
+            data.rx_length = 6;   // addr + func + start_hi + start_lo + qty_hi + qty_lo (echoed, no data)
+
+            data.msg[1] = 0x10;  // Function code: Write Multiple Registers
+            data.msg[2] = 0x00;  // Starting register address high byte (0x0001)
+            data.msg[3] = 0x01;  // Starting register address low byte
+            data.msg[4] = 0x00;  // Number of registers high byte
+            data.msg[5] = 0x02;  // Number of registers low byte (2: control word + speed)
+            data.msg[6] = 0x04;  // Byte count (2 registers x 2 bytes)
+            data.msg[7] = 0x08;  // Control word high byte
+            data.msg[8] = 0x82;  // Control word low byte (Start command)
+            data.msg[9]  = uint8_t(effective_speed >> 8);
+            data.msg[10] = uint8_t(effective_speed & 0xFF);
+
+            log_info("Spindle Enabled in " << (_is_Ccw ? "CCW" : "CW") << " mode (combined start+speed=" << effective_speed << ")");
         }
 
         void CumarkProtocol::set_speed_command(uint32_t dev_speed, ModbusCommand& data){
@@ -194,75 +221,116 @@ namespace Spindles {
             };
         }
 
-        void CumarkProtocol::set_adaptive_feed(bool enable) {
-            _adaptive_feed_enabled = enable;
-            if (enable) {
+        void CumarkProtocol::set_adaptive_feed(float goal_fraction) {
+            // Clamp per policy: goal fraction max 0.9 (90% torque target --
+            // tier 2's >=100% aggressive slowdown owns anything above
+            // that). <= 0 disables goal-seeking (tier 3) only -- tiers 1/2
+            // (hard stall, aggressive overtorque) stay active regardless.
+            if (goal_fraction > 0.9f) {
+                log_warn("CumarkProtocol: adaptive feed goal " << goal_fraction << " clamped to 0.9 (90% torque)");
+                goal_fraction = 0.9f;
+            }
+            if (goal_fraction < 0.0f) {
+                goal_fraction = 0.0f;
+            }
+
+            _adaptive_feed_goal_percent = goal_fraction * 100.0f;
+
+            if (_adaptive_feed_goal_percent > 0.0f) {
                 // Capture whatever the operator already has dialed in right
                 // now as the baseline, so enabling this doesn't yank the
                 // override to some unrelated value.
                 _baseline_override     = sys.f_override();
                 _last_applied_override = _baseline_override;
-                log_info("CumarkProtocol: adaptive feed enabled, baseline override = " << int(_baseline_override) << "%");
+                log_info("CumarkProtocol: adaptive feed goal-seeking enabled, target torque = " << _adaptive_feed_goal_percent
+                                                                                                  << "%, baseline override = "
+                                                                                                  << int(_baseline_override) << "%");
             } else {
-                log_info("CumarkProtocol: adaptive feed disabled");
+                log_info("CumarkProtocol: adaptive feed goal-seeking disabled (hard stall / overtorque tiers remain active)");
+            }
+        }
+
+        // Shared apply/report/log helper for all three tiers.
+        void CumarkProtocol::set_override(Percent target, bool is_hard_trigger) {
+            Percent current = sys.f_override();
+            if (target == current) {
+                return;
+            }
+            sys.set_f_override(target);
+            plan_update_velocity_profile_parameters();  // force already-buffered blocks to recompute at the new override
+            _last_applied_override = target;
+            gc_ovr_changed();  // report the new override immediately rather than waiting for the next status poll
+            if (is_hard_trigger) {
+                log_warn("CumarkProtocol: torque limited/warning (drive-reported), feed override dropped to " << int(target) << "%");
             }
         }
 
         void CumarkProtocol::apply_adaptive_feed() {
-            if (!_adaptive_feed_enabled) {
-                return;
-            }
-
             Percent current = sys.f_override();
 
             // If the override differs from what we last wrote ourselves,
             // the operator changed it via the pendant/UI in the meantime --
-            // adopt it as the new baseline rather than fighting it.
+            // adopt it as the new baseline rather than fighting it. This
+            // applies regardless of which tier ends up acting below.
             if (current != _last_applied_override) {
                 _baseline_override = current;
+                log_debug("CumarkProtocol adaptive feed: operator changed override to " << int(current) << "%, adopting as new baseline");
             }
 
             // Absolute safety floor, except when the operator's own
             // baseline is already lower -- respect their lower choice
-            // rather than forcing it up.
+            // rather than forcing it up. Applies to all three tiers.
             Percent effective_floor = std::min(Percent(_adaptive_feed_floor_percent), _baseline_override);
 
-            Percent target;
-            bool    hard_trigger = _last_torque_limited || _last_warning || _last_torque_percent >= float(_adaptive_feed_limit_percent);
-
-            if (hard_trigger) {
-                target = effective_floor;
-            } else if (_last_torque_percent <= float(_adaptive_feed_warn_percent)) {
-                target = _baseline_override;
-            } else {
-                // Linear interpolation between warn% (-> baseline) and
-                // limit% (-> effective_floor).
-                float span   = float(_adaptive_feed_limit_percent) - float(_adaptive_feed_warn_percent);
-                float frac   = (_last_torque_percent - float(_adaptive_feed_warn_percent)) / span;
-                float scaled = float(_baseline_override) - frac * (float(_baseline_override) - float(effective_floor));
-                target       = Percent(scaled);
+            // ---- Tier 1: hard stall trigger -- ALWAYS active. ----
+            if (_last_torque_limited || _last_warning) {
+                log_debug("CumarkProtocol adaptive feed: TIER1 torque=" << _last_torque_percent << "% limited="
+                                                                         << (_last_torque_limited ? "yes" : "no") << " warning="
+                                                                         << (_last_warning ? "yes" : "no") << " -> floor "
+                                                                         << int(effective_floor) << "%");
+                set_override(effective_floor, true);
+                return;
             }
 
-            Percent applied = current;
-            if (target < current) {
-                // React immediately when backing off -- don't wait for a ramp.
-                applied = target;
-            } else if (target > current) {
-                // Ramp up gradually on recovery, to avoid snapping straight
-                // back into the load that just triggered the throttle.
-                applied = Percent(std::min(uint32_t(target), uint32_t(current) + _adaptive_feed_recover_step));
+            // ---- Tier 2: aggressive overtorque slowdown -- ALWAYS active. ----
+            if (_last_torque_percent >= 95.0f) {
+                Percent step   = Percent(std::min(uint32_t(current > effective_floor ? current - effective_floor : 0),
+                                                   _adaptive_feed_aggressive_step));
+                Percent target = Percent(current - step);
+                log_debug("CumarkProtocol adaptive feed: TIER2 torque=" << _last_torque_percent << "% (>=95%) override " << int(current)
+                                                                         << "% -> " << int(target) << "%");
+                set_override(target, false);
+                return;
             }
 
-
-            if (applied != current) {
-                sys.set_f_override(applied);
-                plan_update_velocity_profile_parameters();  // force already-buffered blocks to recompute at the new override
-                _last_applied_override = applied;
-                gc_ovr_changed();  // report the new override immediately rather than waiting for the next status poll
-                if (hard_trigger) {
-                    log_warn("CumarkProtocol: torque limited/warning (drive-reported), feed override dropped to " << int(applied) << "%");
-                }
+            // ---- Tier 3: goal-seeking -- only when M52 has set a goal. ----
+            if (_adaptive_feed_goal_percent <= 0.0f) {
+                log_debug("CumarkProtocol adaptive feed: TIER3 disabled (torque=" << _last_torque_percent << "%, ignored)");
+                return;
             }
+
+            float error    = _last_torque_percent - _adaptive_feed_goal_percent;
+            float deadband = float(_adaptive_feed_deadband_percent);
+            float target_f = float(current);
+
+            if (error > deadband) {
+                // Above goal -- back off promptly, proportional to how far over.
+                target_f = float(current) - _adaptive_feed_gain_down * (error - deadband);
+            } else if (error < -deadband) {
+                // Below goal -- recover cautiously, proportional to how far under.
+                target_f = float(current) + _adaptive_feed_gain_up * (-error - deadband);
+            }
+            // else: within the deadband, hold steady.
+
+            float   min_f  = float(_adaptive_feed_min_percent);
+            float   max_f  = float(_adaptive_feed_max_percent);  // can be configured above 100 -- opt-in, not default
+            Percent target = Percent(std::max(min_f, std::min(max_f, target_f)));
+            target          = std::max(target, effective_floor);
+
+            log_debug("CumarkProtocol adaptive feed: TIER3 torque=" << _last_torque_percent << "% goal=" << _adaptive_feed_goal_percent
+                                                                     << "% error=" << error << " override " << int(current) << "% -> "
+                                                                     << int(target) << "%");
+            set_override(target, false);
         }
 
         VFDProtocol::response_parser CumarkProtocol::initialization_sequence(int index, ModbusCommand& data, VFDSpindle* vfd) {
@@ -280,6 +348,8 @@ namespace Spindles {
                     return [](const uint8_t* response, VFDSpindle* vfd, VFDProtocol* detail) -> bool {
                         uint16_t value = (response[4] << 8) | response[5];
                         auto cumark           = static_cast<CumarkProtocol*>(detail);
+                        log_debug("Max Speed is: " << (value));
+                        //cumark->_maxSpeed = value;
                         cumark->updateRPM(vfd);
                         return true;
                     };

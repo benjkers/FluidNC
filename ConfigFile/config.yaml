@@ -195,7 +195,10 @@ Cumark:
   spindown_ms: 3000
   speed_map: 0=0.000% 0=3.000% 540=3.000% 18000=100.000%
   off_on_alarm: true
-  adaptive_feed_floor_percent: 25
-  adaptive_feed_warn_percent: 50
-  adaptive_feed_limit_percent: 90
-  adaptive_feed_recover_step: 5
+  adaptive_feed_floor_percent: 10
+  adaptive_feed_min_percent: 50
+  adaptive_feed_max_percent: 150
+  adaptive_feed_gain_down: 2.0
+  adaptive_feed_gain_up: 0.5
+  adaptive_feed_deadband_percent: 2.5
+  adaptive_feed_aggressive_step: 25 

@@ -1723,14 +1723,19 @@ Error gc_execute_line(const char* input_line) {
     if (gc_block.modal.adaptive_feed != gc_state.modal.adaptive_feed) {  // M52 Pn
         gc_state.modal.adaptive_feed = gc_block.modal.adaptive_feed;
         bool enabled                 = gc_state.modal.adaptive_feed == AdaptiveFeed::Enable;
-        spindle->set_adaptive_feed(enabled);
+        // P is a torque-fraction goal (e.g. 0.5 = target 50% torque) for
+        // goal-seeking (tier 3). Clamped to a max of 0.9 inside
+        // set_adaptive_feed() itself. P0/disabled only turns off tier 3 --
+        // the hard-stall and overtorque tiers stay active regardless.
+        spindle->set_adaptive_feed(enabled ? gc_block.values.p : 0.0f);
         if (!enabled) {
             // Give control back to the operator immediately rather than
             // leaving whatever override an adaptive-feed protocol (e.g.
             // CumarkProtocol) last applied in place.
             sys.set_f_override(FeedOverride::Default);
         }
-        log_info("Adaptive feed control " << (enabled ? "enabled" : "disabled"));
+        log_info("Adaptive feed control " << (enabled ? "goal-seeking enabled, target=" : "disabled")
+                                           << (enabled ? gc_block.values.p : 0.0f));
     }
 
     // [7. Spindle control ]:

@@ -36,9 +36,9 @@ namespace Spindles {
 
     // ================== Class methods ==================================
 
-    void VFDSpindle::set_adaptive_feed(bool enable) {
+    void VFDSpindle::set_adaptive_feed(float goal_fraction) {
         if (detail_) {
-            detail_->set_adaptive_feed(enable);
+            detail_->set_adaptive_feed(goal_fraction);
         }
     }
 

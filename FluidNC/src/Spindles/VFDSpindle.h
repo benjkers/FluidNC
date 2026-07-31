@@ -58,7 +58,7 @@ namespace Spindles {
         // Implemented in VFDSpindle.cpp: VFDProtocol is only forward-
         // declared here, so detail_->set_adaptive_feed() can't be called
         // inline in this header.
-        void set_adaptive_feed(bool enable) override;
+        void set_adaptive_feed(float goal_fraction) override;
         void setState(SpindleState state, SpindleSpeed speed) override;
         void setSpeedfromISR(uint32_t dev_speed) override;
 

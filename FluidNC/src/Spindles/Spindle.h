@@ -68,9 +68,11 @@ namespace Spindles {
         virtual bool   use_delay_settings() const { return true; }
         virtual tool_t get_current_tool_num() { return _current_tool; }
         virtual bool   tool_change(uint32_t tool_number, bool pre_select, bool set_tool);
-        // M52 Pn - adaptive feed control enable/disable. Default is a no-op
-        // for spindles/protocols that don't support load-based throttling.
-        virtual void   set_adaptive_feed(bool enable) {}
+        // M52 Pn - adaptive feed control. P is a torque-fraction goal
+        // (e.g. 0.5 = target 50% torque), clamped to a max of 0.9; P0 (or
+        // any value <= 0) disables goal-seeking. Default is a no-op for
+        // spindles/protocols that don't support load-based throttling.
+        virtual void   set_adaptive_feed(float goal_fraction) {}
 
         virtual void setSpeedfromISR(uint32_t dev_speed) = 0;
 

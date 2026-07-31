@@ -13,8 +13,11 @@ minimumRevision = 45917;
 extension = "nc";
 setCodePage("ascii");
 
-capabilities = CAPABILITY_MILLING | CAPABILITY_MACHINE_SIMULATION | CAPABILITY_MULTIAXIS;
+capabilities = CAPABILITY_MILLING | CAPABILITY_MACHINE_SIMULATION;
 tolerance = spatial(0.001, MM);
+if (typeof revision == "number" && typeof supportedFeatures != "undefined") {
+  supportedFeatures |= revision >= 50328 ? FEATURE_MACHINE_ROTARY_ANGLES : 0;
+}
 
 minimumChordLength = spatial(0.25, MM);
 minimumCircularRadius = spatial(0.01, MM);
@@ -23,22 +26,33 @@ minimumCircularSweep = toRad(0.01);
 maximumCircularSweep = toRad(180);
 allowHelicalMoves = true;
 allowedCircularPlanes = undefined; // allow any circular motion
-
-// Per-operation post options -- shows up as a "Post Process" tab in each
-// operation's own dialog (distinct from the global properties below).
-// Requires the CAM setup to use a Machine Configuration with this post
-// assigned to it -- if this tab doesn't appear, that's almost always why.
-operationProperties = {
-  useAdaptiveFeed: {
-    title      : "Adaptive feed control",
-    description: "Enable torque-based adaptive feed control (M52) for this specific operation. Lets you turn it off for e.g. finishing passes or probing while leaving it on for roughing.",
-    type       : "boolean",
-    value      : true
-  }
-};
+highFeedrate = (unit == MM) ? 5000 : 200;
 
 // user-defined properties
 properties = {
+  // PER-OPERATION property. Note this lives inside the normal properties
+  // object and is marked scope:"operation" -- it is NOT in a separate
+  // operationProperties = {} object. Using that separate object caused
+  // Fusion to silently suppress this entire properties list; this pattern
+  // (verified against a working production Okuma post) does not.
+  adaptiveFeedGoal: {
+    title      : "Adaptive feed target torque %",
+    description: "Torque-based adaptive feed control (M52) target for this operation, as a percentage of rated torque. The feed override is scaled continuously to hold this target -- not stepped -- so it converges smoothly rather than hunting. 0 disables goal-seeking for this operation; the machine's hard-stall and overtorque protections stay active regardless, independent of this setting. The firmware clamps to 90% max. Defaults to a deliberately low, fail-safe value: if you forget to raise it, the machine runs conservatively slow rather than risk overload/breaking a tool.",
+    group      : "operationProps",
+    type       : "integer",
+    value      : 5,
+    range      : [0, 90],
+    scope      : "operation",
+    enabled    : ["milling", "drilling"]
+  },
+  homeXYOnRotary: {
+    title      : "Home XY on 4th/5th axis moves",
+    description: "Retracts to machine home in X and Y (in addition to the Z retract that always happens) before any 4th/5th axis repositioning move. Use this when tall or off-centre work on the rotary axis could swing into the spindle or column as it indexes. The retract uses whatever 'Safe Retracts' method is selected above.",
+    group      : "homePositions",
+    type       : "boolean",
+    value      : true,
+    scope      : "post"
+  },
   safePositionMethod: {
     title      : "Safe Retracts",
     description: "Select your desired retract option. 'Clearance Height' retracts to the operation clearance height.",
@@ -63,6 +77,7 @@ properties = {
       {title:"Only on tool change", id:"toolChange"}
     ],
     value: "false",
+    order: 1,
     scope: "post"
   },
   sequenceNumberStart: {
@@ -71,6 +86,7 @@ properties = {
     group      : "formats",
     type       : "integer",
     value      : 10,
+    order      : 2,
     scope      : "post"
   },
   sequenceNumberIncrement: {
@@ -79,6 +95,7 @@ properties = {
     group      : "formats",
     type       : "integer",
     value      : 1,
+    order      : 3,
     scope      : "post"
   },
   separateWordsWithSpace: {
@@ -89,17 +106,9 @@ properties = {
     value      : false,
     scope      : "post"
   },
-  useToolCall: {
-    title      : "Output tool number",
-    description: "Disable to disallow the output of tool numbers (Txx).",
-    group      : "preferences",
-    type       : "boolean",
-    value      : true,
-    scope      : "post"
-  },
-  useM06: {
-    title      : "Output M6",
-    description: "Disable to disallow the output of M6 on tool changes.",
+  outputToolChange: {
+    title      : "Output tool change (Tn M6)",
+    description: "Outputs the tool number and M6 together on every tool change (e.g. 'T2 M6'). FluidNC's tool changer needs both together to work at all -- M6 is what actually triggers a tool change, and the T-number tells it which tool -- so these used to be two separate properties that could be set inconsistently (e.g. M6 off with the tool number still on, silently breaking every tool change with no output to show why). Disable only if you don't want any tool-change output at all (e.g. single-tool jobs).",
     group      : "preferences",
     type       : "boolean",
     value      : true,
@@ -123,16 +132,16 @@ wcsDefinitions = {
   ]
 };
 
-var gFormat = createFormat({prefix:"G", decimals:1});
-var mFormat = createFormat({prefix:"M", decimals:1});
+var gFormat = createFormat({prefix:"G", decimals:0});
+var mFormat = createFormat({prefix:"M", decimals:0});
 
 var xyzFormat = createFormat({decimals:(unit == MM ? 3 : 4)});
-var abcFormat = createFormat({decimals:3, forceDecimal:true, scale:DEG});
+var abcFormat = createFormat({decimals:3, type:FORMAT_REAL, scale:DEG});
 var feedFormat = createFormat({decimals:(unit == MM ? 1 : 2)});
-var inverseTimeFormat = createFormat({decimals:3, forceDecimal:true});
+var inverseTimeFormat = createFormat({decimals:3, type:FORMAT_REAL});
 var toolFormat = createFormat({decimals:0});
 var rpmFormat = createFormat({decimals:0});
-var secFormat = createFormat({decimals:3, forceDecimal:true}); // seconds - range 0.001-1000
+var secFormat = createFormat({decimals:3, type:FORMAT_REAL}); // seconds - range 0.001-1000
 var taperFormat = createFormat({decimals:1, scale:DEG});
 
 var xOutput = createOutputVariable({onchange:function() {state.retractedX = false;}, prefix:"X"}, xyzFormat);
@@ -156,7 +165,7 @@ var gAbsIncModal = createOutputVariable({}, gFormat); // modal group 3 // G90-91
 var gFeedModeModal = createOutputVariable({}, gFormat); // modal group 5 // G93-94
 var gUnitModal = createOutputVariable({}, gFormat); // modal group 6 // G20-21
 var fourthAxisClamp = createOutputVariable({}, mFormat);
-var fithAxisClamp = createOutputVariable({}, mFormat);
+var fifthAxisClamp = createOutputVariable({}, mFormat);
 
 var settings = {
   coolant: {
@@ -165,13 +174,13 @@ var settings = {
     // {id: COOLANT_THROUGH_TOOL, on: [8, 88], off: [9, 89]}
     // {id: COOLANT_THROUGH_TOOL, on: "M88 P3 (myComment)", off: "M89"}
     coolants: [
-      {id:COOLANT_FLOOD, on:8, off: 8.1},
-      {id:COOLANT_MIST,on:7, off: 7.1},
+      {id:COOLANT_FLOOD, on:8},
+      {id:COOLANT_MIST},
       {id:COOLANT_THROUGH_TOOL},
       {id:COOLANT_AIR},
       {id:COOLANT_AIR_THROUGH_TOOL},
       {id:COOLANT_SUCTION},
-      {id:COOLANT_FLOOD_MIST, on: [8, 7], off:9},
+      {id:COOLANT_FLOOD_MIST},
       {id:COOLANT_FLOOD_THROUGH_TOOL},
       {id:COOLANT_OFF, off:9}
     ],
@@ -179,8 +188,8 @@ var settings = {
   },
   retract: {
     cancelRotationOnRetracting: false, // specifies that rotations (G68) need to be canceled prior to retracting
-    methodXY                  : "G53", // special condition, overwrite retract behavior per axis
-    methodZ                   : "G53", // special condition, overwrite retract behavior per axis
+    methodXY                  : undefined, // special condition, overwrite retract behavior per axis
+    methodZ                   : undefined, // was hardcoded "G28", which silently overrode the "Safe Retracts" property for every Z retract -- undefined lets that property apply
     useZeroValues             : ["G28", "G30"], // enter property value id(s) for using "0" value instead of machineConfiguration axes home position values (ie G30 Z0)
     homeXY                    : {onIndexing:false, onToolChange:false, onProgramEnd:{axes:[X, Y]}} // Specifies when XY should be homed in XY (sample: onIndexing:[X,Y]). Options can be combined
   },
@@ -194,9 +203,8 @@ var settings = {
     eulerConvention       : EULER_ZXZ_R, // specifies the euler convention (ie EULER_XYZ_R), set to undefined to use machine angles for TWP commands ('undefined' requires machine configuration)
     eulerCalculationMethod: "standard", // ('standard' / 'machine') 'machine' adjusts euler angles to match the machines ABC orientation, machine configuration required
     cancelTiltFirst       : true, // cancel tilted workplane prior to WCS (G54-G59) blocks
-    useABCPrepositioning  : false, // position ABC axes prior to tilted workplane blocks
     forceMultiAxisIndexing: false, // force multi-axis indexing for 3D programs
-    optimizeType          : undefined // can be set to OPTIMIZE_NONE, OPTIMIZE_BOTH, OPTIMIZE_TABLES, OPTIMIZE_HEADS, OPTIMIZE_AXIS. 'undefined' uses legacy rotations
+    optimizeType          : OPTIMIZE_AXIS // can be set to OPTIMIZE_NONE, OPTIMIZE_BOTH, OPTIMIZE_TABLES, OPTIMIZE_HEADS, OPTIMIZE_AXIS. 'undefined' uses legacy rotations
   },
   comments: {
     permittedCommentChars: " abcdefghijklmnopqrstuvwxyz0123456789.,=_-*:", // letters are not case sensitive, use option 'outputFormat' below. Set to 'undefined' to allow any character
@@ -227,6 +235,15 @@ function onOpen() {
     setWordSeparator("");
   }
 
+  // Home XY on rotary indexing, if enabled. The Z retract before an
+  // indexing move already happens unconditionally in setWorkPlane(); this
+  // adds the XY home on top of it. Uses the {axes:[...]} form to match
+  // homeXY.onProgramEnd -- getRetractParameters() reads arguments[0].axes,
+  // so a bare [X, Y] array would not work here.
+  if (getProperty("homeXYOnRotary")) {
+    settings.retract.homeXY.onIndexing = {axes:[X, Y]};
+  }
+
   if (programName) {
     writeComment(programName);
   }
@@ -253,16 +270,28 @@ function onSection() {
   optionalSection = currentSection.isOptional();
   var insertToolCall = isToolChangeNeeded("number") || forceSectionRestart;
   var newWorkOffset = isNewWorkOffset() || forceSectionRestart;
-  var newWorkPlane = isNewWorkPlane() || forceSectionRestart;
+  var newWorkPlane = isNewWorkPlane() || forceSectionRestart || (typeof defineWorkPlane == "function" &&
+    Vector.diff(defineWorkPlane(getPreviousSection(), false), defineWorkPlane(currentSection, false)).length > 1e-4);
 
-  if (insertToolCall || newWorkOffset || newWorkPlane) {
-    // stop spindle before retract during tool change
+  if (insertToolCall || newWorkOffset || newWorkPlane || state.tcpIsActive || currentSection.isMultiAxis()) {
     if (insertToolCall && !isFirstSection()) {
-      onCommand(COMMAND_STOP_SPINDLE);
+      onCommand(COMMAND_COOLANT_OFF); // turn off coolant before retract during tool change
+      onCommand(COMMAND_STOP_SPINDLE); // stop spindle before retract during tool change
     }
-    writeRetract(Z);
+    writeRetract(Z); // retract
+    if (isFirstSection()) {
+      cancelWorkPlane(machineConfiguration.isMultiAxisConfiguration() && settings.workPlaneMethod.useTiltedWorkplane);
+      if (machineConfiguration.isMultiAxisConfiguration()) {
+        positionABC(new Vector(0, 0, 0));
+      }
+      forceABC();
+    } else {
+      if (insertToolCall || newWorkPlane) {
+        cancelWorkPlane();
+      }
+    }
   }
-  
+
   writeln("");
 
   writeComment(getParameter("operation-comment", ""));
@@ -276,15 +305,29 @@ function onSection() {
   }
   startSpindle(tool, insertToolCall);
 
-  // Adaptive feed control (M52) -- per-operation toggle, see
-  // operationProperties.useAdaptiveFeed above. Only emitted when the
-  // desired state actually differs from the last one written, so we don't
-  // spam M52 on every single operation.
-  var wantAdaptiveFeed = currentSection.properties.useAdaptiveFeed ? true : false;
-  if (lastAdaptiveFeedState === undefined || wantAdaptiveFeed != lastAdaptiveFeedState) {
-    writeBlock("M52 P" + (wantAdaptiveFeed ? 1 : 0));
-    lastAdaptiveFeedState = wantAdaptiveFeed;
+  // Adaptive feed control (M52) -- per-operation torque-goal, see
+  // the adaptiveFeedGoal property above -- a scope:"operation" integer
+  // percentage (0-90), read per-section so each toolpath can differ.
+  // M52 Pn itself takes a 0-0.9 FRACTION, converted in setAdaptiveFeed().
+  // The actual M52 lines are emitted by updateAdaptiveFeedForMovement()
+  // as moves transition between cutting and non-cutting, not here. The
+  // firmware clamps the fraction to 0.9 max and treats 0 as "disable
+  // goal-seeking" -- the hard-stall and overtorque protections stay
+  // active regardless.
+  var adaptiveFeedGoalPercent;
+  if (currentSection.properties && currentSection.properties.adaptiveFeedGoal !== undefined) {
+    adaptiveFeedGoalPercent = parseInt(currentSection.properties.adaptiveFeedGoal, 10);
+  } else {
+    adaptiveFeedGoalPercent = parseInt(getProperty("adaptiveFeedGoal", 0), 10);
   }
+  if (isNaN(adaptiveFeedGoalPercent)) {
+    adaptiveFeedGoalPercent = 0;
+  }
+  currentAdaptiveFeedGoal = adaptiveFeedGoalPercent;
+  // Always start an operation with adaptive feed off -- the approach and
+  // lead-in happen first, and updateAdaptiveFeedForMovement() turns it on
+  // when real cutting begins.
+  setAdaptiveFeed(false);
 
   // Output modal commands here
   writeBlock(gPlaneModal.format(17), gAbsIncModal.format(90), gFeedModeModal.format(94));
@@ -295,7 +338,7 @@ function onSection() {
   }
   writeWCS(currentSection, true);
 
-  var abc = defineWorkPlane(currentSection, true);
+  var abc = defineWorkPlane(currentSection, !machineConfiguration.isHeadConfiguration());
 
   setCoolant(tool.coolant); // writes the required coolant codes
 
@@ -303,7 +346,7 @@ function onSection() {
 
   // prepositioning
   var initialPosition = getFramePosition(currentSection.getInitialPosition());
-  var isRequired = insertToolCall || state.retractedZ || !state.lengthCompensationActive  || (!isFirstSection() && getPreviousSection().isMultiAxis());
+  var isRequired = insertToolCall || state.retractedZ || !state.lengthCompensationActive || (!isFirstSection() && getPreviousSection().isMultiAxis());
   writeInitialPositioning(initialPosition, isRequired);
 }
 
@@ -437,6 +480,7 @@ function forceCircular(plane) {
 }
 
 function onCircular(clockwise, cx, cy, cz, x, y, z, feed) {
+  updateAdaptiveFeedForMovement();
   // one of X/Y and I/J are required and likewise
 
   if (pendingRadiusCompensation >= 0) {
@@ -499,7 +543,6 @@ function onCommand(command) {
   switch (command) {
   case COMMAND_COOLANT_OFF:
     setCoolant(COOLANT_OFF);
-    
     return;
   case COMMAND_COOLANT_ON:
     setCoolant(tool.coolant);
@@ -525,13 +568,10 @@ function onCommand(command) {
     if (tool.number != 100) {
       writeBlock("#<_fusion_tool_gauge>=" + xyzFormat.format(getBodyLength(tool)));
     }
-    if (getProperty("useToolCall")) {
-      writeToolBlock("T" + toolFormat.format(tool.number), conditional(getProperty("useM06"), mFormat.format(6)));
-      if (!isFirstSection() && !getProperty("useM06")) {
-        writeComment(localize("CHANGE TO T") + tool.number);
-      }
-    } else if (getProperty("useM06")) {
-      writeToolBlock(mFormat.format(6));
+    if (getProperty("outputToolChange")) {
+      writeToolBlock("T" + toolFormat.format(tool.number), mFormat.format(6));
+    } else {
+      machineSimulation({mode:TOOLCHANGE}); // simulate tool change
     }
     writeComment(tool.comment);
     if (tool.number != 100 && getProperty("outputToolLengthCheck")) {
@@ -545,7 +585,7 @@ function onCommand(command) {
     if (machineConfiguration.isMultiAxisConfiguration()) {
       // writeBlock(fourthAxisClamp.format(25)); // lock 4th axis
       if (machineConfiguration.getNumberOfAxes() > 4) {
-        // writeBlock(fithAxisClamp.format(35)); // lock 5th axis
+        // writeBlock(fifthAxisClamp.format(35)); // lock 5th axis
       }
     }
     return;
@@ -553,12 +593,12 @@ function onCommand(command) {
     if (machineConfiguration.isMultiAxisConfiguration()) {
       // writeBlock(fourthAxisClamp.format(26)); // unlock 4th axis
       if (machineConfiguration.getNumberOfAxes() > 4) {
-        // writeBlock(fithAxisClamp.format(36)); // unlock 5th axis
+        // writeBlock(fifthAxisClamp.format(36)); // unlock 5th axis
       }
     }
     return;
   case COMMAND_BREAK_CONTROL:
-      writeBlock("$SD/Run=BreakDetection.nc")
+    writeBlock("$SD/Run=BreakDetection.nc");
     return;
   case COMMAND_TOOL_MEASURE:
     // Fires from a Manual NC "Measure Tool" step in the Fusion timeline.
@@ -583,53 +623,16 @@ function onSectionEnd() {
     writeBlock(gFeedModeModal.format(94)); // inverse time feed off
   }
   writeBlock(gPlaneModal.format(17));
-  if (!isLastSection() && (getNextSection().getTool().coolant != tool.coolant)) {
-    setCoolant(COOLANT_OFF);
+  if (!isLastSection()) {
+    if (getNextSection().getTool().coolant != tool.coolant) {
+      setCoolant(COOLANT_OFF);
+    }
+    if (tool.breakControl && isToolChangeNeeded(getNextSection(), getProperty("toolAsName") ? "description" : "number")) {
+      onCommand(COMMAND_BREAK_CONTROL);
+    }
   }
   forceAny();
-  if(tool.breakControl){
-      onCommand(COMMAND_BREAK_CONTROL)
-  }
 }
-
-// Start of onRewindMachine logic
-/** Allow user to override the onRewind logic. */
-function onRewindMachineEntry(_a, _b, _c) {
-  return false;
-}
-
-/** Retract to safe position before indexing rotaries. */
-function onMoveToSafeRetractPosition() {
-  writeRetract(Z);
-}
-
-/** Rotate axes to new position above reentry position */
-function onRotateAxes(_x, _y, _z, _a, _b, _c) {
-  // position rotary axes
-  xOutput.disable();
-  yOutput.disable();
-  zOutput.disable();
-  invokeOnRapid5D(_x, _y, _z, _a, _b, _c);
-  setCurrentABC(new Vector(_a, _b, _c));
-  xOutput.enable();
-  yOutput.enable();
-  zOutput.enable();
-}
-
-/** Return from safe position after indexing rotaries. */
-function onReturnFromSafeRetractPosition(_x, _y, _z) {
-  // position in XY
-  forceXYZ();
-  xOutput.reset();
-  yOutput.reset();
-  zOutput.disable();
-  invokeOnRapid(_x, _y, _z);
-
-  // position in Z
-  zOutput.enable();
-  invokeOnRapid(_x, _y, _z);
-}
-// End of onRewindMachine logic
 
 function writeProgramEnd() {
   setCoolant(COOLANT_OFF);
@@ -648,12 +651,10 @@ function writeProgramEnd() {
 
 function onClose() {
   optionalSection = false;
-  if (lastAdaptiveFeedState) {
-    // Don't leave adaptive feed control active for whatever runs after
-    // this job (manual MDI moves, the next unrelated program, etc.).
-    writeBlock("M52 P0");
-    lastAdaptiveFeedState = false;
-  }
+  // Don't leave adaptive feed control active for whatever runs after this
+  // job (manual MDI moves, the next unrelated program, etc.).
+  currentAdaptiveFeedGoal = 0;
+  setAdaptiveFeed(false);
   writeln("");
   writeProgramEnd();
 }
@@ -675,7 +676,37 @@ var validateLengthCompensation = getSetting("outputToolLengthCompensation", true
 var multiAxisFeedrate;
 var sequenceNumber;
 var optionalSection = false;
-var lastAdaptiveFeedState = undefined;  // tracks the last M52 state actually written, so we only emit it on change
+// ---------------------------------------------------------------------
+// Adaptive feed (M52) state.
+//
+// currentAdaptiveFeedGoal is this operation's target, set in onSection.
+// adaptiveFeedActive tracks whether M52 is currently ENABLED in the
+// output stream. Adaptive feed is deliberately suppressed during every
+// non-cutting move -- rapids, lead in/out, plunges, ramps and link moves
+// -- and only enabled once actual cutting starts. Without this, torque
+// reads ~0 during an air move, so the goal-seeking controller ramps the
+// override UP chasing its target and the tool then enters the cut at a
+// high override. Re-enabling only on real cutting moves avoids that.
+var currentAdaptiveFeedGoal = 0;
+var adaptiveFeedActive = false;
+
+function setAdaptiveFeed(on) {
+  if (on == adaptiveFeedActive) {
+    return; // no change, don't spam M52
+  }
+  writeBlock("M52 P" + (on ? xyzFormat.format(currentAdaptiveFeedGoal / 100) : "0"));
+  adaptiveFeedActive = on;
+}
+
+// Called at the top of every motion handler. `movement` is the kernel's
+// current move classification.
+function updateAdaptiveFeedForMovement() {
+  if (currentAdaptiveFeedGoal <= 0) {
+    return; // goal-seeking off for this operation entirely
+  }
+  var isCutting = (movement == MOVEMENT_CUTTING) || (movement == MOVEMENT_FINISH_CUTTING);
+  setAdaptiveFeed(isCutting);
+}
 var currentWorkOffset;
 var forceSpindleSpeed = false;
 var operationNeedsSafeStart = false; // used to convert blocks to optional for safeStartAllOperations
@@ -695,8 +726,7 @@ function activateMachine() {
   // setup usage of useTiltedWorkplane
   settings.workPlaneMethod.useTiltedWorkplane = getProperty("useTiltedWorkplane") != undefined ? getProperty("useTiltedWorkplane") :
     getSetting("workPlaneMethod.useTiltedWorkplane", false);
-  settings.workPlaneMethod.useABCPrepositioning = getProperty("useABCPrepositioning") != undefined ? getProperty("useABCPrepositioning") :
-    getSetting("workPlaneMethod.useABCPrepositioning", false);
+  settings.workPlaneMethod.useABCPrepositioning = getSetting("workPlaneMethod.useABCPrepositioning", true);
 
   if (!machineConfiguration.isMultiAxisConfiguration()) {
     return; // don't need to modify any settings for 3-axis machines
@@ -705,6 +735,9 @@ function activateMachine() {
   // identify if any of the rotary axes has TCP enabled
   var axes = [machineConfiguration.getAxisU(), machineConfiguration.getAxisV(), machineConfiguration.getAxisW()];
   tcp.isSupportedByMachine = axes.some(function(axis) {return axis.isEnabled() && axis.isTCPEnabled();}); // true if TCP is enabled on any rotary axis
+  if (tcp.isSupportedByMachine) {
+    bufferRotaryMoves = false; // disable bufferRotaryMoves if TCP is enabled on any rotary axis
+  }
 
   // save multi-axis feedrate settings from machine configuration
   var mode = machineConfiguration.getMultiAxisFeedrateMode();
@@ -728,11 +761,11 @@ function activateMachine() {
     safeRetractDistance = getProperty("safeRetractDistance");
   }
 
-  if (machineConfiguration.isHeadConfiguration()) {
-    compensateToolLength = typeof compensateToolLength == "undefined" ? false : compensateToolLength;
+  if (revision >= 50294) {
+    activateAutoPolarMode({tolerance:tolerance / 2, optimizeType:OPTIMIZE_AXIS, expandCycles:getSetting("polarCycleExpandMode", EXPAND_ALL)});
   }
 
-  if (machineConfiguration.isHeadConfiguration() && compensateToolLength) {
+  if (machineConfiguration.isHeadConfiguration() && getSetting("workPlaneMethod.compensateToolLength", false)) {
     for (var i = 0; i < getNumberOfSections(); ++i) {
       var section = getSection(i);
       if (section.isMultiAxis()) {
@@ -749,7 +782,11 @@ function getBodyLength(tool) {
   for (var i = 0; i < getNumberOfSections(); ++i) {
     var section = getSection(i);
     if (tool.number == section.getTool().number) {
-      return section.getParameter("operation:tool_overallLength", tool.bodyLength + tool.holderLength);
+      if (section.hasParameter("operation:tool_assemblyGaugeLength")) { // For Fusion
+        return section.getParameter("operation:tool_assemblyGaugeLength", tool.bodyLength + tool.holderLength);
+      } else { // Legacy products
+        return section.getParameter("operation:tool_overallLength", tool.bodyLength + tool.holderLength);
+      }
     }
   }
   return tool.bodyLength + tool.holderLength;
@@ -781,7 +818,9 @@ function validateCommonParameters() {
   for (var i = 0; i < getNumberOfSections(); ++i) {
     var section = getSection(i);
     if (getSection(0).workOffset == 0 && section.workOffset > 0) {
-      error(localize("Using multiple work offsets is not possible if the initial work offset is 0."));
+      if (!(typeof wcsDefinitions != "undefined" && wcsDefinitions.useZeroOffset)) {
+        error(localize("Using multiple work offsets is not possible if the initial work offset is 0."));
+      }
     }
     if (section.isMultiAxis()) {
       if (!section.isOptimizedForMachine() &&
@@ -956,7 +995,7 @@ function formatComment(text) {
     text = filterText(String(text), _permittedCommentChars);
   }
   text = String(text).substring(0, settings.comments.maximumLineLength - prefix.length - suffix.length);
-  return text != "" ?  prefix + text + suffix : "";
+  return text != "" ? prefix + text + suffix : "";
 }
 
 /**
@@ -966,7 +1005,7 @@ function writeComment(text) {
   if (!text) {
     return;
   }
-  var comments = String(text).split(EOL);
+  var comments = String(text).split(/\r?\n/);
   for (comment in comments) {
     var _comment = formatComment(comments[comment]);
     if (_comment) {
@@ -991,6 +1030,7 @@ function writeToolBlock() {
   setProperty("showSequenceNumbers", (show == "true" || show == "toolChange") ? "true" : "false");
   writeBlock(arguments);
   setProperty("showSequenceNumbers", show);
+  machineSimulation({/*x:toPreciseUnit(200, MM), y:toPreciseUnit(200, MM), coordinates:MACHINE,*/ mode:TOOLCHANGE}); // move machineSimulation to a tool change position
 }
 
 var skipBlocks = false;
@@ -1038,17 +1078,20 @@ function onPassThrough(text) {
 
 function forceModals() {
   if (arguments.length == 0) { // reset all modal variables listed below
-    if (typeof gMotionModal != "undefined") {
-      gMotionModal.reset();
+    var modals = [
+      "gMotionModal",
+      "gPlaneModal",
+      "gAbsIncModal",
+      "gFeedModeModal",
+      "feedOutput"
+    ];
+    if (operationNeedsSafeStart && (typeof currentSection != "undefined" && currentSection.isMultiAxis())) {
+      modals.push("fourthAxisClamp", "fifthAxisClamp", "sixthAxisClamp");
     }
-    if (typeof gPlaneModal != "undefined") {
-      gPlaneModal.reset();
-    }
-    if (typeof gAbsIncModal != "undefined") {
-      gAbsIncModal.reset();
-    }
-    if (typeof gFeedModeModal != "undefined") {
-      gFeedModeModal.reset();
+    for (var i = 0; i < modals.length; ++i) {
+      if (typeof this[modals[i]] != "undefined") {
+        this[modals[i]].reset();
+      }
     }
   } else {
     for (var i in arguments) {
@@ -1108,7 +1151,7 @@ function getRetractParameters() {
   var singleLine = arguments[0].singleLine == undefined ? true : arguments[0].singleLine;
   var words = []; // store all retracted axes in an array
   var retractAxes = new Array(false, false, false);
-  var method = getProperty("safePositionMethod", "undefined");
+  var method = getProperty("safePositionMethod", "G53");  // fallback matches our configured default -- "undefined" here previously crashed Simulate when the property wasn't populated yet
   if (method == "clearanceHeight") {
     if (!is3D()) {
       error(localize("Safe retract option 'Clearance Height' is only supported when all operations are along the setup Z-axis."));
@@ -1164,16 +1207,186 @@ function getRetractParameters() {
       return undefined;
     }
   }
-  return {method:method, retractAxes:retractAxes, words:words, singleLine:singleLine};
+  return {
+    method     : method,
+    retractAxes: retractAxes,
+    words      : words,
+    positions  : {
+      x: retractAxes[0] ? _xHome : undefined,
+      y: retractAxes[1] ? _yHome : undefined,
+      z: retractAxes[2] ? _zHome : undefined},
+    singleLine: singleLine};
 }
 
 /** Returns true when subprogram logic does exist into the post. */
 function subprogramsAreSupported() {
   return typeof subprogramState != "undefined";
 }
+
+// Start of machine simulation connection move support
+var debugSimulation = false; // enable to output debug information for connection move support in the NC program
+var TCPON = "TCP ON";
+var TCPOFF = "TCP OFF";
+var TWPON = "TWP ON";
+var TWPOFF = "TWP OFF";
+var TOOLCHANGE = "TOOL CHANGE";
+var RETRACTTOOLAXIS = "RETRACT TOOLAXIS";
+var WORK = "WORK CS";
+var MACHINE = "MACHINE CS";
+var MIN = "MIN";
+var MAX = "MAX";
+var SHORTEST = "SHORTEST";
+var PROGRAMMED = "PROGRAMMED";
+var WARNING_NON_RANGE = [0, 1, 2];
+var isTwpOn;
+var isTcpOn;
+/**
+ * Helper function for connection moves in machine simulation.
+ * @param {Object} parameters An object containing the desired options for machine simulation.
+ * @note Available properties are:
+ * @param {Number} x X axis position, alternatively use MIN or MAX to move to the axis limit
+ * @param {Number} y Y axis position, alternatively use MIN or MAX to move to the axis limit
+ * @param {Number} z Z axis position, alternatively use MIN or MAX to move to the axis limit
+ * @param {Number} a A axis position (in radians)
+ * @param {Number} b B axis position (in radians)
+ * @param {Number} c C axis position (in radians)
+ * @param {Number} feed desired feedrate, automatically set to high/current feedrate if not specified
+ * @param {String} mode mode TCPON | TCPOFF | TWPON | TWPOFF | TOOLCHANGE | RETRACTTOOLAXIS
+ * @param {String} coordinates WORK | MACHINE - if undefined, work coordinates will be used by default
+ * @param {Number} eulerAngles the calculated Euler angles for the workplane
+ * @param {String} rotaryMode SHORTEST | PROGRAMMED - if undefined, the default rotary mode will be used
+ * @example
+  machineSimulation({a:abc.x, b:abc.y, c:abc.z, coordinates:MACHINE});
+  machineSimulation({x:toPreciseUnit(200, MM), y:toPreciseUnit(200, MM), coordinates:MACHINE, mode:TOOLCHANGE});
+  machineSimulation({a:abc.x, b:abc.y, c:abc.z, coordinates:MACHINE, rotaryMode:SHORTEST});
+*/
+function machineSimulation(parameters) {
+  if (revision < 50198 || skipBlocks || (getSimulationStreamPath() == "" && !debugSimulation)) {
+    return; // return when post kernel revision is lower than 50198 or when skipBlocks is enabled
+  }
+  getAxisLimit = function(axis, limit) {
+    validate(limit == MIN || limit == MAX, subst(localize("Invalid argument \"%1\" passed to the machineSimulation function."), limit));
+    var range = axis.getRange();
+    if (range.isNonRange()) {
+      var axisLetters = ["X", "Y", "Z"];
+      var warningMessage = subst(localize("An attempt was made to move the \"%1\" axis to its MIN/MAX limits during machine simulation, but its range is set to \"unlimited\"." + EOL +
+        "A limited range must be set for the \"%1\" axis in the machine definition, or these motions will not be shown in machine simulation."), axisLetters[axis.getCoordinate()]);
+      warningOnce(warningMessage, WARNING_NON_RANGE[axis.getCoordinate()]);
+      return undefined;
+    }
+    return limit == MIN ? range.minimum : range.maximum;
+  };
+  var x = (isNaN(parameters.x) && parameters.x) ? getAxisLimit(machineConfiguration.getAxisX(), parameters.x) : parameters.x;
+  var y = (isNaN(parameters.y) && parameters.y) ? getAxisLimit(machineConfiguration.getAxisY(), parameters.y) : parameters.y;
+  var z = (isNaN(parameters.z) && parameters.z) ? getAxisLimit(machineConfiguration.getAxisZ(), parameters.z) : parameters.z;
+  var rotaryAxesErrorMessage = localize("Invalid argument for rotary axes passed to the machineSimulation function. Only numerical values are supported.");
+  var a = (isNaN(parameters.a) && parameters.a) ? error(rotaryAxesErrorMessage) : parameters.a;
+  var b = (isNaN(parameters.b) && parameters.b) ? error(rotaryAxesErrorMessage) : parameters.b;
+  var c = (isNaN(parameters.c) && parameters.c) ? error(rotaryAxesErrorMessage) : parameters.c;
+  var coordinates = parameters.coordinates;
+  var eulerAngles = parameters.eulerAngles;
+  var rotaryMode = parameters.rotaryMode;
+  var feed = parameters.feed;
+  if (feed === undefined && typeof gMotionModal !== "undefined") {
+    feed = gMotionModal.getCurrent() !== 0;
+  }
+  var mode = parameters.mode;
+  var performToolChange = mode == TOOLCHANGE;
+  if (mode !== undefined && ![TCPON, TCPOFF, TWPON, TWPOFF, TOOLCHANGE, RETRACTTOOLAXIS].includes(mode)) {
+    error(subst("Mode '%1' is not supported.", mode));
+  }
+  if (rotaryMode !== undefined && ![SHORTEST, PROGRAMMED].includes(rotaryMode)) {
+    error(subst(localize("Rotary mode '%1' is not supported."), rotaryMode));
+  }
+
+  // mode takes precedence over TCP/TWP states
+  var enableTCP = isTcpOn;
+  var enableTWP = isTwpOn;
+  if (mode === TCPON || mode === TCPOFF) {
+    enableTCP = mode === TCPON;
+  } else if (mode === TWPON || mode === TWPOFF) {
+    enableTWP = mode === TWPON;
+  } else {
+    enableTCP = typeof state !== "undefined" && state.tcpIsActive;
+    enableTWP = typeof state !== "undefined" && state.twpIsActive;
+  }
+  var disableTCP = !enableTCP;
+  var disableTWP = !enableTWP;
+  if (disableTWP) {
+    simulation.setTWPModeOff();
+    isTwpOn = false;
+  }
+  if (disableTCP) {
+    simulation.setTCPModeOff();
+    isTcpOn = false;
+  }
+  if (enableTCP) {
+    simulation.setTCPModeOn();
+    isTcpOn = true;
+  }
+  if (enableTWP) {
+    if (settings.workPlaneMethod.eulerConvention == undefined) {
+      simulation.setTWPModeAlignToCurrentPose();
+    } else if (eulerAngles) {
+      simulation.setTWPModeByEulerAngles(settings.workPlaneMethod.eulerConvention, eulerAngles.x, eulerAngles.y, eulerAngles.z);
+    }
+    isTwpOn = true;
+  }
+  if (mode == RETRACTTOOLAXIS) {
+    simulation.retractAlongToolAxisToLimit();
+  }
+
+  if (debugSimulation) {
+    writeln("  DEBUG" + JSON.stringify(parameters));
+    writeln("  DEBUG" + JSON.stringify({isTwpOn:isTwpOn, isTcpOn:isTcpOn, feed:feed}));
+  }
+
+  if (x !== undefined || y !== undefined || z !== undefined || a !== undefined || b !== undefined || c !== undefined) {
+    if (x !== undefined) {simulation.setTargetX(x);}
+    if (y !== undefined) {simulation.setTargetY(y);}
+    if (z !== undefined) {simulation.setTargetZ(z);}
+    if (a !== undefined) {simulation.setTargetA(a);}
+    if (b !== undefined) {simulation.setTargetB(b);}
+    if (c !== undefined) {simulation.setTargetC(c);}
+
+    if (feed != undefined && feed) {
+      simulation.setMotionToLinear();
+      simulation.setFeedrate(typeof feed == "number" ? feed : feedOutput.getCurrent() == 0 ? highFeedrate : feedOutput.getCurrent());
+    } else {
+      simulation.setMotionToRapid();
+    }
+
+    var supportsRotaryMode = rotaryMode !== undefined && revision >= 50338;
+    var saveRotaryDirection = supportsRotaryMode ? simulation.getRotaryDirection() : undefined;
+    if (supportsRotaryMode) {
+      if (rotaryMode === SHORTEST) {
+        simulation.setRotaryToGoShortestDirection();
+      } else if (rotaryMode === PROGRAMMED) {
+        simulation.setRotaryToGoProgrammedDirection();
+      }
+    }
+
+    if (coordinates != undefined && coordinates == MACHINE) {
+      simulation.moveToTargetInMachineCoords();
+    } else {
+      simulation.moveToTargetInWorkCoords();
+    }
+
+    if (supportsRotaryMode) {
+      if (saveRotaryDirection === ROTARY_DIRECTION_AS_PROGRAMMED) {
+        simulation.setRotaryToGoProgrammedDirection();
+      } else {
+        simulation.setRotaryToGoShortestDirection();
+      }
+    }
+  }
+  if (performToolChange) {
+    simulation.performToolChangeCycle();
+    simulation.moveToTargetInMachineCoords();
+  }
+}
 // <<<<< INCLUDED FROM include_files/commonFunctions.cpi
 // >>>>> INCLUDED FROM include_files/defineMachine.cpi
-var compensateToolLength = false; // add the tool length to the pivot distance for nonTCP rotary heads
 function defineMachine() {
   var useTCP = true;
   if (false) { // note: setup your machine here
@@ -1275,7 +1488,8 @@ function defineWorkPlane(_section, _setWorkPlane) {
 function isTCPSupportedByOperation(_section) {
   var _tcp = _section.getOptimizedTCPMode() == OPTIMIZE_NONE;
   if (!_section.isMultiAxis() && (settings.workPlaneMethod.useTiltedWorkplane ||
-    isSameDirection(machineConfiguration.getSpindleAxis(), getForwardDirection(_section)) ||
+    (machineConfiguration.isMultiAxisConfiguration() && settings.workPlaneMethod.optimizeType != undefined ?
+      getWorkPlaneMachineABC(_section, false).isZero() : isSameDirection(machineConfiguration.getSpindleAxis(), getForwardDirection(_section))) ||
     settings.workPlaneMethod.optimizeType == OPTIMIZE_HEADS ||
     settings.workPlaneMethod.optimizeType == OPTIMIZE_TABLES ||
     settings.workPlaneMethod.optimizeType == OPTIMIZE_BOTH)) {
@@ -1299,7 +1513,7 @@ function getWorkPlaneMachineABC(_section, rotate) {
       setRotation(useTCP ? _section.workPlane : R);
     } else {
       if (!_section.isOptimizedForMachine()) {
-        machineConfiguration.setToolLength(compensateToolLength ? _section.getTool().overallLength : 0); // define the tool length for head adjustments
+        machineConfiguration.setToolLength(getSetting("workPlaneMethod.compensateToolLength", false) ? getBodyLength(_section.getTool()) : 0); // define the tool length for head adjustments
         _section.optimize3DPositionsByMachine(machineConfiguration, abc, settings.workPlaneMethod.optimizeType);
       }
     }
@@ -1308,11 +1522,6 @@ function getWorkPlaneMachineABC(_section, rotate) {
 }
 // <<<<< INCLUDED FROM include_files/getWorkPlaneMachineABC.cpi
 // >>>>> INCLUDED FROM include_files/positionABC.cpi
-
-var previousA = undefined;
-var previousB = undefined;
-var previousC = undefined;
-
 function positionABC(abc, force) {
   if (!machineConfiguration.isMultiAxisConfiguration()) {
     error("Function 'positionABC' can only be used with multi-axis machine configurations.");
@@ -1326,34 +1535,17 @@ function positionABC(abc, force) {
   var a = aOutput.format(abc.x);
   var b = bOutput.format(abc.y);
   var c = cOutput.format(abc.z);
-
- // Check if there is a change in A, B, or C positions
-  var hasABCorCChanged = (previousA !== abc.x) || (previousB !== abc.y) || (previousC !== abc.z);
-
-  
-   
   if (a || b || c) {
-    writeRetract(Z);       
-    if (getProperty("retractToHomeOnABC") && hasABCorCChanged) {
-      writeRetract(X, Y);
-      writeBlock(currentSection.wcs);          
+    writeRetract(Z);
+    if (getSetting("retract.homeXY.onIndexing", false)) {
+      writeRetract(settings.retract.homeXY.onIndexing);
     }
     onCommand(COMMAND_UNLOCK_MULTI_AXIS);
     gMotionModal.reset();
     writeBlock(gMotionModal.format(0), a, b, c);
-
-    if (getCurrentSectionId() != -1) {
-        setCurrentABC(abc); // required for machine simulation
-    }
-
-    // Update the previous positions
-    previousA = abc.x;
-    previousB = abc.y;
-    previousC = abc.z;
+    setCurrentABC(abc); // required for machine simulation
+    machineSimulation({a:abc.x, b:abc.y, c:abc.z, coordinates:MACHINE});
   }
-  
-
-  
 }
 // <<<<< INCLUDED FROM include_files/positionABC.cpi
 // >>>>> INCLUDED FROM include_files/coolant.cpi
@@ -1477,6 +1669,9 @@ function writeWCS(section, wcsIsRequired) {
       writeBlock(section.wcs);
     });
     currentWorkOffset = section.workOffset;
+    if (revision >= 50338 && getCurrentSectionId() > 0 && section.workOffset != getPreviousSection().workOffset) {
+      simulation.activateWorkCoordsForNextOperation();
+    }
   }
 }
 // <<<<< INCLUDED FROM include_files/writeWCS.cpi
@@ -1489,7 +1684,6 @@ function writeToolCall(tool, insertToolCall) {
   }
   writeStartBlocks(insertToolCall, function () {
     writeRetract(Z);
-    
     if (getSetting("retract.homeXY.onToolChange", false)) {
       writeRetract(settings.retract.homeXY.onToolChange);
     }
@@ -1498,12 +1692,8 @@ function writeToolCall(tool, insertToolCall) {
         forceWorkPlane();
       }
       onCommand(COMMAND_COOLANT_OFF); // turn off coolant on tool change
-      
-      if (typeof disableLengthCompensation == "function") {
-        disableLengthCompensation(false);
-      }
     }
-    
+
     if (tool.manualToolChange) {
       onCommand(COMMAND_STOP);
       writeComment("MANUAL TOOL CHANGE TO T" + toolFormat.format(tool.number));
@@ -1517,11 +1707,9 @@ function writeToolCall(tool, insertToolCall) {
   if (typeof forceModals == "function" && (insertToolCall || getProperty("safeStartAllOperations"))) {
     forceModals();
   }
-  
 }
 // <<<<< INCLUDED FROM include_files/writeToolCall.cpi
 // >>>>> INCLUDED FROM include_files/startSpindle.cpi
-
 function startSpindle(tool, insertToolCall) {
   if (tool.type != TOOL_PROBE) {
     var spindleSpeedIsRequired = insertToolCall || forceSpindleSpeed || isFirstSection() ||
@@ -1553,15 +1741,6 @@ properties.writeTools = {
   value      : true,
   scope      : "post"
 };
-properties.retractToHomeOnABC = {
-  title       : "Retract to Home on ABC Motion",
-  description : "Enable tool to retract to G53 G0 Z0 and G53 G0 X0 Y0 before any A, B, or C motion.",
-  group       : "custom",
-  type        : "boolean",
-  value       : false,
-  scope       : "post"
-};
-
 function writeProgramHeader() {
   // dump machine configuration
   var vendor = machineConfiguration.getVendor();
@@ -1576,7 +1755,7 @@ function writeProgramHeader() {
       writeComment("  " + localize("model") + ": " + model);
     }
     if (mDescription) {
-      writeComment("  " + localize("description") + ": "  + mDescription);
+      writeComment("  " + localize("description") + ": " + mDescription);
     }
   }
 
@@ -1628,6 +1807,7 @@ var gRotationModal = createOutputVariable({current : 69,
     if (typeof probeVariables != "undefined") {
       probeVariables.outputRotationCodes = probeVariables.probeAngleMethod == "G68";
     }
+    machineSimulation({}); // update machine simulation TWP state
   }}, gFormat);
 
 var currentWorkPlaneABC = undefined;
@@ -1668,17 +1848,16 @@ function setWorkPlane(abc) {
     if (getSetting("retract.homeXY.onIndexing", false)) {
       writeRetract(settings.retract.homeXY.onIndexing);
     }
-    if (currentSection.getId() > 0 && (isTCPSupportedByOperation(getSection(currentSection.getId() - 1) || tcp.isSupportedByOperation)) && typeof disableLengthCompensation == "function") {
-      disableLengthCompensation(); // cancel TCP
+    if (typeof cancelLengthCompensation == "function") {
+      cancelLengthCompensation(); // cancel tool lenght compensation / TCP prior to output TWP
     }
-
     if (settings.workPlaneMethod.useTiltedWorkplane) {
       onCommand(COMMAND_UNLOCK_MULTI_AXIS);
       cancelWorkPlane();
       if (machineConfiguration.isMultiAxisConfiguration()) {
         var machineABC = abc.isNonZero() ? (currentSection.isMultiAxis() ? getCurrentDirection() : getWorkPlaneMachineABC(currentSection, false)) : abc;
         if (settings.workPlaneMethod.useABCPrepositioning || machineABC.isZero()) {
-          positionABC(machineABC, false);
+          positionABC(machineABC);
         } else {
           setCurrentABC(machineABC);
         }
@@ -1690,6 +1869,7 @@ function setWorkPlane(abc) {
           "I" + abcFormat.format(abc.x), "J" + abcFormat.format(abc.y), "K" + abcFormat.format(abc.z)
         ); // set frame
         writeBlock(gFormat.format(53.1)); // turn machine
+        machineSimulation({a:getCurrentABC().x, b:getCurrentABC().y, c:getCurrentABC().z, coordinates:MACHINE, eulerAngles:abc});
       }
     } else {
       positionABC(abc, true);
@@ -1730,31 +1910,78 @@ function writeInitialPositioning(position, isRequired, codes1, codes2) {
   forceModals(gMotionModal);
   writeStartBlocks(isRequired, function() {
     var modalCodes = formatWords(gAbsIncModal.format(90), gPlaneModal.format(17));
-    if (typeof disableLengthCompensation == "function") {
-      disableLengthCompensation(!isRequired); // cancel tool length compensation prior to enabling it, required when switching G43/G43.4 modes
+    if (typeof cancelLengthCompensation == "function") {
+      cancelLengthCompensation(!isRequired); // cancel tool length compensation prior to enabling it, required when switching G43/G43.4 modes
     }
 
-    // multi axis prepositioning with TWP
-    if (currentSection.isMultiAxis() && getSetting("workPlaneMethod.prepositionWithTWP", true) && getSetting("workPlaneMethod.useTiltedWorkplane", false) &&
-      tcp.isSupportedByOperation && getCurrentDirection().isNonZero()) {
-      var W = machineConfiguration.isMultiAxisConfiguration() ? machineConfiguration.getOrientation(getCurrentDirection()) :
-        Matrix.getOrientationFromDirection(getCurrentDirection());
-      var prePosition = W.getTransposed().multiply(position);
-      var angles = W.getEuler2(settings.workPlaneMethod.eulerConvention);
-      setWorkPlane(angles);
-      writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(prePosition.x), yOutput.format(prePosition.y), feed, additionalCodes[0]);
+    if (machineConfiguration.isHeadConfiguration()) { // head/head head/table kinematics
+      cancelTransformation();
+      var machineABC = currentSection.isMultiAxis() ? defineWorkPlane(currentSection, false) : getWorkPlaneMachineABC(currentSection, false);
+      machineConfiguration.setToolLength(getSetting("workPlaneMethod.compensateToolLength", false) ? getBodyLength(currentSection.getTool()) : 0); // define the tool length for head adjustments
+      var mode = currentSection.isOptimizedForMachine() ? TCP_XYZ_OPTIMIZED : TCP_XYZ;
+      var globalPosition = getGlobalPosition(currentSection.getInitialPosition());
+      var machinePosition = machineConfiguration.getOptimizedPosition(globalPosition, machineABC, mode, OPTIMIZE_BOTH, true);
+      var prePosition = (currentSection.isOptimizedForMachine() || currentSection.isMultiAxis()) ? position :
+        (settings.workPlaneMethod.useTiltedWorkplane && !tcp.isSupportedByMachine) ? machinePosition : globalPosition;
+
       cancelWorkPlane();
-      writeBlock(getOffsetCode(), hOffset, additionalCodes[1]); // omit Z-axis output is desired
-      forceAny(); // required to output XYZ coordinates in the following line
+      positionABC(machineABC);
+      if ((getSetting("workPlaneMethod.useTiltedWorkplane", false) && tcp.isSupportedByMachine && getCurrentDirection().isNonZero()) || tcp.isSupportedByOperation) {
+        setTCP(true, true); // force TCP for prepositioning although the operation may not require it
+      }
+      writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(prePosition.x), yOutput.format(prePosition.y), feed, additionalCodes[0]);
+      machineSimulation({x:prePosition.x, y:prePosition.y});
+      if (currentSection.isMultiAxis() || getSetting("headPositioningMethod", 0) == 1) {
+        var lengthComp = state.lengthCompensationActive ? {code:undefined, hOffset:undefined} : {code:getLengthCompCode(), hOffset:hOffset};
+        writeBlock(modalCodes, gMotionModal.format(motionCode.single), lengthComp.code, zOutput.format(prePosition.z), lengthComp.hOffset, additionalCodes[1]);
+        machineSimulation({z:prePosition.z});
+      }
+
+      if (!currentSection.isMultiAxis()) {
+        if (state.tcpIsActive && !tcp.isSupportedByOperation && typeof setTCP == "function") {
+          setTCP(false);
+        }
+        if (getSetting("workPlaneMethod.useTiltedWorkplane", false) && getCurrentDirection().isNonZero()) {
+          var saveRetractedState = [state.retractedX, state.retractedY, state.retractedZ];
+          state.retractedX = state.retractedY = state.retractedZ = true; // set retracted states to true to avoid retraction
+          defineWorkPlane(currentSection, true); // apply workplane for the operation if TWP is supported
+          [state.retractedX, state.retractedY, state.retractedZ] = saveRetractedState; // restore retracted states
+        }
+        if (!state.lengthCompensationActive) {
+          if (state.twpIsActive) {
+            forceXYZ();
+          }
+          if (getSetting("headPositioningMethod", 0) == 1) {
+            writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(position.x), yOutput.format(position.y));
+            machineSimulation({x:position.x, y:position.y});
+            writeBlock(modalCodes, gMotionModal.format(motionCode.single), getLengthCompCode(), zOutput.format(position.z), hOffset);
+            machineSimulation({z:position.z});
+          } else {
+            writeBlock(modalCodes, getLengthCompCode(), gMotionModal.format(motionCode.single), xOutput.format(position.x), yOutput.format(position.y), zOutput.format(position.z), hOffset);
+            machineSimulation({x:position.x, y:position.y, z:position.z});
+          }
+        }
+      }
+      forceFeed();
     } else {
-      if (machineConfiguration.isHeadConfiguration()) {
-        writeBlock(modalCodes, gMotionModal.format(motionCode.multi), getOffsetCode(),
-          xOutput.format(position.x), yOutput.format(position.y), zOutput.format(position.z),
-          hOffset, feed, additionalCodes
-        );
+      // multi axis prepositioning with TWP
+      if (currentSection.isMultiAxis() && getSetting("workPlaneMethod.prepositionWithTWP", true) && getSetting("workPlaneMethod.useTiltedWorkplane", false) &&
+        tcp.isSupportedByOperation && getCurrentDirection().isNonZero()) {
+        var W = machineConfiguration.isMultiAxisConfiguration() ? machineConfiguration.getOrientation(getCurrentDirection()) :
+          Matrix.getOrientationFromDirection(getCurrentDirection());
+        var prePosition = W.getTransposed().multiply(position);
+        var angles = W.getEuler2(settings.workPlaneMethod.eulerConvention);
+        setWorkPlane(angles);
+        writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(prePosition.x), yOutput.format(prePosition.y), feed, additionalCodes);
+        machineSimulation({x:prePosition.x, y:prePosition.y});
+        cancelWorkPlane();
+        setTCP(true); // omit Z-axis output is desired
+        forceAny(); // required to output XYZ coordinates in the following line
       } else {
         writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(position.x), yOutput.format(position.y), feed, additionalCodes[0]);
-        writeBlock(gMotionModal.format(motionCode.single), getOffsetCode(), zOutput.format(position.z), hOffset, additionalCodes[1]);
+        machineSimulation({x:position.x, y:position.y});
+        writeBlock(gMotionModal.format(motionCode.single), getLengthCompCode(), zOutput.format(position.z), hOffset, additionalCodes[1]);
+        machineSimulation(tcp.isSupportedByOperation ? {x:position.x, y:position.y, z:position.z} : {z:position.z});
       }
     }
     forceModals(gMotionModal);
@@ -1766,11 +1993,16 @@ function writeInitialPositioning(position, isRequired, codes1, codes2) {
   validate(!validateLengthCompensation || state.lengthCompensationActive, "Tool length compensation is not active."); // make sure that lenght compensation is enabled
   if (!isRequired) { // simple positioning
     var modalCodes = formatWords(gAbsIncModal.format(90), gPlaneModal.format(17));
+    forceXYZ();
     if (!state.retractedZ && xyzFormat.getResultingValue(getCurrentPosition().z) < xyzFormat.getResultingValue(position.z)) {
       writeBlock(modalCodes, gMotionModal.format(motionCode.single), zOutput.format(position.z), feed);
+      machineSimulation({z:position.z});
     }
-    forceXYZ();
     writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(position.x), yOutput.format(position.y), feed, additionalCodes);
+    machineSimulation({x:position.x, y:position.y});
+  }
+  if (machineConfiguration.isMultiAxisConfiguration() && !currentSection.isMultiAxis()) {
+    onCommand(COMMAND_LOCK_MULTI_AXIS);
   }
 }
 
@@ -1790,6 +2022,7 @@ Matrix.getOrientationFromDirection = function (ijk) {
 // <<<<< INCLUDED FROM include_files/initialPositioning_fanuc.cpi
 // >>>>> INCLUDED FROM include_files/onRapid_fanuc.cpi
 function onRapid(_x, _y, _z) {
+  updateAdaptiveFeedForMovement();
   var x = xOutput.format(_x);
   var y = yOutput.format(_y);
   var z = zOutput.format(_z);
@@ -1798,22 +2031,18 @@ function onRapid(_x, _y, _z) {
       error(localize("Radius compensation mode cannot be changed at rapid traversal."));
       return;
     }
-    
-    //writeBlock("G94");
-    writeBlock(gFeedModeModal.format(94), gMotionModal.format(0), x, y, z);
-    //writeBlock(gMotionModal.format(0), x, y, z);
+    writeBlock(gMotionModal.format(0), x, y, z);
     forceFeed();
   }
- 
 }
 // <<<<< INCLUDED FROM include_files/onRapid_fanuc.cpi
 // >>>>> INCLUDED FROM include_files/onLinear_fanuc.cpi
 function onLinear(_x, _y, _z, feed) {
+  updateAdaptiveFeedForMovement();
   if (pendingRadiusCompensation >= 0) {
     xOutput.reset();
     yOutput.reset();
   }
-  
   var x = xOutput.format(_x);
   var y = yOutput.format(_y);
   var z = zOutput.format(_z);
@@ -1847,6 +2076,7 @@ function onLinear(_x, _y, _z, feed) {
 // <<<<< INCLUDED FROM include_files/onLinear_fanuc.cpi
 // >>>>> INCLUDED FROM include_files/onRapid5D_fanuc.cpi
 function onRapid5D(_x, _y, _z, _a, _b, _c) {
+  updateAdaptiveFeedForMovement();
   if (pendingRadiusCompensation >= 0) {
     error(localize("Radius compensation mode cannot be changed at rapid traversal."));
     return;
@@ -1862,17 +2092,14 @@ function onRapid5D(_x, _y, _z, _a, _b, _c) {
   var c = currentSection.isOptimizedForMachine() ? cOutput.format(_c) : toolVectorOutputK.format(_c);
 
   if (x || y || z || a || b || c) {
-   
-    //writeBlock("G94");
-    writeBlock(gFeedModeModal.format(94), gMotionModal.format(0), x, y, z, a, b, c);
-    //writeBlock(gMotionModal.format(0), x, y, z, a, b, c);
+    writeBlock(gMotionModal.format(0), x, y, z, a, b, c);
     forceFeed();
   }
-   
 }
 // <<<<< INCLUDED FROM include_files/onRapid5D_fanuc.cpi
 // >>>>> INCLUDED FROM include_files/onLinear5D_fanuc.cpi
 function onLinear5D(_x, _y, _z, _a, _b, _c, feed, feedMode) {
+  updateAdaptiveFeedForMovement();
   if (pendingRadiusCompensation >= 0) {
     error(localize("Radius compensation cannot be activated/deactivated for 5-axis move."));
     return;
@@ -1889,11 +2116,8 @@ function onLinear5D(_x, _y, _z, _a, _b, _c, feed, feedMode) {
   if (feedMode == FEED_INVERSE_TIME) {
     forceFeed();
   }
-  
   var f = feedMode == FEED_INVERSE_TIME ? inverseTimeOutput.format(feed) : getFeed(feed);
   var fMode = feedMode == FEED_INVERSE_TIME ? 93 : getProperty("useG95") ? 95 : 94;
-
-
 
   if (x || y || z || a || b || c) {
     writeBlock(gFeedModeModal.format(fMode), gMotionModal.format(1), x, y, z, a, b, c, f);
@@ -1904,7 +2128,6 @@ function onLinear5D(_x, _y, _z, _a, _b, _c, feed, feedMode) {
       writeBlock(gFeedModeModal.format(fMode), gMotionModal.format(1), f);
     }
   }
-  
 }
 // <<<<< INCLUDED FROM include_files/onLinear5D_fanuc.cpi
 // >>>>> INCLUDED FROM include_files/writeRetract_fanuc.cpi
@@ -1914,8 +2137,8 @@ function writeRetract() {
     if (typeof cancelWCSRotation == "function" && getSetting("retract.cancelRotationOnRetracting", false)) { // cancel rotation before retracting
       cancelWCSRotation();
     }
-    if (typeof disableLengthCompensation == "function" && getSetting("allowCancelTCPBeforeRetracting", false) && state.tcpIsActive) {
-      disableLengthCompensation(); // cancel TCP before retracting
+    if (typeof setTCP == "function" && getSetting("allowCancelTCPBeforeRetracting", false)) {
+      setTCP(false); // cancel TCP before retracting
     }
     for (var i in retract.words) {
       var words = retract.singleLine ? retract.words : retract.words[i];
@@ -1937,11 +2160,17 @@ function writeRetract() {
       default:
         if (typeof writeRetractCustom == "function") {
           writeRetractCustom(retract);
+          return;
         } else {
           error(subst(localize("Unsupported safe position method '%1'"), retract.method));
-          return;
         }
       }
+      machineSimulation({
+        x          : retract.singleLine || words.indexOf("X") != -1 ? retract.positions.x : undefined,
+        y          : retract.singleLine || words.indexOf("Y") != -1 ? retract.positions.y : undefined,
+        z          : retract.singleLine || words.indexOf("Z") != -1 ? retract.positions.z : undefined,
+        coordinates: MACHINE
+      });
       if (retract.singleLine) {
         break;
       }
@@ -1949,24 +2178,101 @@ function writeRetract() {
   }
 }
 // <<<<< INCLUDED FROM include_files/writeRetract_fanuc.cpi
-// >>>>> INCLUDED FROM include_files/getOffsetCode_fanuc.cpi
-var toolLengthCompOutput = createOutputVariable({control : CONTROL_FORCE,
+// >>>>> INCLUDED FROM include_files/lengthCompFunctions_fanuc.cpi
+if (typeof lengthCompCodes === "undefined") {
+  var lengthCompCodes = {tool:43, tcp:43.4, tcpVector:43.5, cancel:49};
+}
+var lengthCompOutput = createOutputVariable({control : CONTROL_FORCE,
   onchange: function() {
-    state.tcpIsActive = toolLengthCompOutput.getCurrent() == 43.4 || toolLengthCompOutput.getCurrent() == 43.5;
-    state.lengthCompensationActive = toolLengthCompOutput.getCurrent() != 49;
+    state.tcpIsActive = lengthCompOutput.getCurrent() == lengthCompCodes.tcp || lengthCompOutput.getCurrent() == lengthCompCodes.tcpVector;
+    state.lengthCompensationActive = lengthCompOutput.getCurrent() != lengthCompCodes.cancel;
+    machineSimulation({}); // update machine simulation TCP state
   }
 }, gFormat);
 
-function getOffsetCode() {
-  if (!getSetting("outputToolLengthCompensation", true) && toolLengthCompOutput.isEnabled()) {
+function getLengthCompCode(forceTCP) {
+  if (!getSetting("outputToolLengthCompensation", true) && lengthCompOutput.isEnabled()) {
     state.lengthCompensationActive = true; // always assume that length compensation is active
-    toolLengthCompOutput.disable();
+    lengthCompOutput.disable();
   }
-  var offsetCode = 43;
-  if (tcp.isSupportedByOperation) {
-    offsetCode = machineConfiguration.isMultiAxisConfiguration() ? 43.4 : 43.5;
+  var lengthCompCode = lengthCompCodes.tool;
+  if (tcp.isSupportedByOperation || forceTCP) {
+    lengthCompCode = machineConfiguration.isMultiAxisConfiguration() ? lengthCompCodes.tcp : lengthCompCodes.tcpVector;
   }
-  return toolLengthCompOutput.format(offsetCode);
+  return lengthCompOutput.format(lengthCompCode);
 }
-// <<<<< INCLUDED FROM include_files/getOffsetCode_fanuc.cpi
+
+function setTCP(_tcp, force) {
+  if (!force && state.tcpIsActive === _tcp) {
+    return;
+  }
+  cancelLengthCompensation();
+  if (_tcp) {
+    var hOffset = getSetting("outputToolLengthOffset", true) ? hFormat.format(tool.lengthOffset) : "";
+    writeBlock(getLengthCompCode(force), hOffset);
+    forceXYZ();
+  }
+}
+// <<<<< INCLUDED FROM include_files/lengthCompFunctions_fanuc.cpi
+// >>>>> INCLUDED FROM include_files/rewind.cpi
+function onMoveToSafeRetractPosition() {
+  if (!getSetting("allowCancelTCPBeforeRetracting", false)) {
+    writeRetract(Z);
+  }
+  if (state.tcpIsActive) { // cancel TCP so that tool doesn't follow rotaries
+    setTCP(false);
+  }
+  writeRetract(Z);
+  if (getSetting("retract.homeXY.onIndexing", false)) {
+    writeRetract(settings.retract.homeXY.onIndexing);
+  }
+}
+
+/** Rotate axes to new position above reentry position */
+function onRotateAxes(_x, _y, _z, _a, _b, _c) {
+  // position rotary axes
+  xOutput.disable();
+  yOutput.disable();
+  zOutput.disable();
+  if (typeof unwindABC == "function") {
+    unwindABC(new Vector(_a, _b, _c), false);
+  }
+  onRapid5D(_x, _y, _z, _a, _b, _c);
+  setCurrentABC(new Vector(_a, _b, _c));
+  machineSimulation({a:_a, b:_b, c:_c, coordinates:MACHINE});
+  xOutput.enable();
+  yOutput.enable();
+  zOutput.enable();
+  forceXYZ();
+}
+
+/** Return from safe position after indexing rotaries. */
+function onReturnFromSafeRetractPosition(_x, _y, _z) {
+  if (!machineConfiguration.isHeadConfiguration()) {
+    writeInitialPositioning(new Vector(_x, _y, _z), true);
+    if (highFeedMapping != HIGH_FEED_NO_MAPPING) {
+      onLinear5D(_x, _y, _z, getCurrentDirection().x, getCurrentDirection().y, getCurrentDirection().z, highFeedrate);
+    } else {
+      onRapid5D(_x, _y, _z, getCurrentDirection().x, getCurrentDirection().y, getCurrentDirection().z);
+    }
+    machineSimulation({x:_x, y:_y, z:_z, a:getCurrentDirection().x, b:getCurrentDirection().y, c:getCurrentDirection().z});
+  } else {
+    if (tcp.isSupportedByOperation) {
+      setTCP(true);
+    }
+    forceXYZ();
+    xOutput.reset();
+    yOutput.reset();
+    zOutput.disable();
+    if (highFeedMapping != HIGH_FEED_NO_MAPPING) {
+      onLinear(_x, _y, _z, highFeedrate);
+    } else {
+      onRapid(_x, _y, _z);
+    }
+    machineSimulation({x:_x, y:_y});
+    zOutput.enable();
+    invokeOnRapid(_x, _y, _z);
+  }
+}
+// <<<<< INCLUDED FROM include_files/rewind.cpi
 // <<<<< INCLUDED FROM ../common/grbl.cps
