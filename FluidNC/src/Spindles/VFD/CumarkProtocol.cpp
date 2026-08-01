@@ -3,7 +3,7 @@
 #include "../../System.h"
 #include "../../Config.h"
 #include "../../GCode.h"
-#include "../../Planner.h"
+#include "../../Protocol.h"  // protocol_send_event, feedOverrideEvent
 #include <algorithm>
 
 namespace Spindles {
@@ -112,113 +112,110 @@ namespace Spindles {
             data.msg[5] = effective_speed & 0xFF;
         }
 
-        VFDProtocol::response_parser CumarkProtocol::get_current_speed(ModbusCommand& data) {
-            // NOTE: data length is excluding the CRC16 checksum.
+        // ---------------------------------------------------------------
+        // Single block read of the fieldbus data set, registers 0x0004-0x0006.
+        //
+        // This one transaction replaces what used to be three separate
+        // polls (speed / torque / status), so every signal the adaptive
+        // feed control needs arrives on EVERY poll instead of every third.
+        //
+        //   0x0004  Fieldbus status word  -- fixed, needs no drive config.
+        //             bit 7  Alarm
+        //             bit 9  Torque limited
+        //             bit 14 Direction reverse
+        //             bit 15 Fault
+        //   0x0005  Field bus actual value 1  -- REQUIRES drive param
+        //             50.03 Act1 src = P.01.22 (motor torque, 0.1% units)
+        //   0x0006  Field bus actual value 2  -- REQUIRES drive param
+        //             50.04 Act2 src = P.01.00 (motor speed)
+        //
+        // These sit in the same fieldbus data set as the control word
+        // (0x0001) and speed reference (0x0002) this driver already writes
+        // successfully, so the block is known to be reachable over Modbus.
+        //
+        // tx 6 bytes / rx 9 bytes, both comfortably inside the 16-byte
+        // VFD_RS485_MAX_MSG_SIZE -- no shared buffer change needed.
+        //
+        // All three polling hooks below return this same parser, so the
+        // framework's round-robin runs it on every iteration. That is safe
+        // here because Cumark uses use_delay_settings() == true, so the
+        // speed-sync path in VFDSpindle::setState() is never taken and the
+        // old dedicated speed poll served no purpose.
+        // ---------------------------------------------------------------
+        VFDProtocol::response_parser CumarkProtocol::fieldbus_block_read(ModbusCommand& data) {
             data.tx_length = 6;
-            data.rx_length = 5;
+            data.rx_length = 9;  // addr + func + byte_count + 3 registers (6 bytes)
 
-            data.msg[1] = 0x03;
-            data.msg[2] = 0x01;
-            data.msg[3] = 0x00;  // Register 01.00 (Motor speed)
-            data.msg[4] = 0x00;
-            data.msg[5] = 0x01;
+            data.msg[1] = 0x03;  // Read Holding Registers
+            data.msg[2] = 0x00;  // start 0x0004 high
+            data.msg[3] = 0x04;  // start 0x0004 low
+            data.msg[4] = 0x00;  // count high
+            data.msg[5] = 0x03;  // count low (3 registers: 0x0004, 0x0005, 0x0006)
 
             return [](const uint8_t* response, VFDSpindle* vfd, VFDProtocol* detail) -> bool {
-                // NOTE: this fixes a pre-existing offset bug -- previously
-                // read response[4]/response[5], but the Modbus RTU response
-                // format is [addr][func][byte_count][data...], so the
-                // first register's data starts at response[3], matching
-                // the convention used in get_status_ok() below. This bug
-                // predates the adaptive-feed work and isn't introduced by
-                // it -- flagging it since it's directly adjacent to code
-                // touched here.
-                uint32_t RPM = (response[3] << 8) | response[4];
+                uint16_t status = (uint16_t)((response[3] << 8) | response[4]);   // 0x0004
+                int16_t  act1   = (int16_t)((response[5] << 8) | response[6]);    // 0x0005 -> torque
+                int16_t  act2   = (int16_t)((response[7] << 8) | response[8]);    // 0x0006 -> speed
 
-                // Store speed for synchronization
-                vfd->_sync_dev_speed = RPM;
+                bool fault          = (status & (1 << 15)) != 0;
+                bool alarm          = (status & (1 << 7)) != 0;
+                bool torque_limited = (status & (1 << 9)) != 0;
+                bool is_reverse     = (status & (1 << 14)) != 0;
+                (void)is_reverse;  // available as direction feedback, not acted on yet
+
+                auto* self = static_cast<CumarkProtocol*>(detail);
+
+                // Torque can read negative during regenerative deceleration;
+                // only the magnitude matters for stall risk.
+                self->_last_torque_percent = std::abs(float(act1) / 10.0f);
+                self->_last_torque_limited = torque_limited;
+                self->_last_warning        = alarm;
+
+                vfd->_sync_dev_speed = (uint32_t)std::abs((int)act2);
+
+                log_debug("Cumark block read: status=" << int(status) << " torque=" << self->_last_torque_percent
+                                                          << "% speed=" << act2 << " fault=" << (fault ? "Y" : "N")
+                                                          << " alarm=" << (alarm ? "Y" : "N") << " tqlim="
+                                                          << (torque_limited ? "Y" : "N"));
+
+                // Diagnostic: if torque reads exactly zero for a long run
+                // while the spindle is turning, drive param 50.03 is most
+                // likely not pointed at P.01.22, so 0x0005 is never being
+                // populated. Warn once rather than silently goal-seeking
+                // against a dead signal.
+                if (act1 == 0 && act2 != 0) {
+                    if (self->_zero_torque_polls < 200) {
+                        self->_zero_torque_polls++;
+                        if (self->_zero_torque_polls == 100) {
+                            log_warn("CumarkProtocol: torque has read 0 for 100 polls while the spindle is turning -- check drive "
+                                     "param 50.03 Act1 src = P.01.22, and 50.00 Fieldbus enable");
+                        }
+                    }
+                } else if (act1 != 0) {
+                    self->_zero_torque_polls = 0;
+                }
+
+                self->apply_adaptive_feed();
+
+                if (fault || alarm) {
+                    log_warn("VFD Has Fault or Warning");
+                    return false;
+                }
                 return true;
             };
         }
 
-        VFDProtocol::response_parser CumarkProtocol::get_status_ok(ModbusCommand& data) {
-            // NOTE: data length is excluding the CRC16 checksum.
-            data.tx_length = 6;
-            data.rx_length = 11;  // addr + func + byte_count + 4 registers (8 bytes)
-
-            // Read 4 CONSECUTIVE registers in one transaction, spanning
-            // 06.00 (Status word1) through 06.03 (Speed control status
-            // word) -- 06.01/06.02 are read too (unused) purely because
-            // they sit in between and Modbus reads a contiguous block.
-            // This merges what used to be two separate polls
-            // (get_status_ok + get_current_direction) into one, which
-            // halves this poll's contribution to the round-robin cadence:
-            // the adaptive-feed check (driven by 06.03's torque-limit bit)
-            // now runs every 2nd poll cycle instead of every 3rd.
-            data.msg[1] = 0x03;   // Function code: Read Holding Register
-            data.msg[2] = 0x06;   // Starting address high byte (06.00)
-            data.msg[3] = 0x00;   // Starting address low byte
-            data.msg[4] = 0x00;   // Number of registers high byte
-            data.msg[5] = 0x04;   // Number of registers low byte (4 registers)
-
-            return [](const uint8_t* response, VFDSpindle* vfd, VFDProtocol* detail) -> bool {
-                // response[3..4] = 06.00 Status word1, response[9..10] = 06.03 Speed control status word.
-                uint16_t status_word1  = (response[3] << 8) | response[4];
-                uint16_t status_word4  = (response[9] << 8) | response[10];
-
-                // Bit 1 to determine direction: 0 = Forward, 1 = Reverse
-                bool is_reverse = (status_word4 & (1 << 1)) != 0;
-                (void)is_reverse;  // not currently acted on
-
-                // Check Bit 1 (Drive Fault) and Bit 2 (Drive Warning)
-                bool has_fault   = (status_word1 & (1 << 1)) != 0;
-                bool has_warning = (status_word1 & (1 << 2)) != 0;
-
-                // Bit 13 of 06.03: "Torque limit" -- the drive is already
-                // clamping torque, i.e. as close to a stall as the drive
-                // itself will allow. Both this and the warning bit above
-                // drive the adaptive feed control (M52) as hard safety
-                // nets alongside the proportional torque% signal.
-                bool torque_limited = (status_word4 & (1 << 13)) != 0;
-                auto* self               = static_cast<CumarkProtocol*>(detail);
-                self->_last_torque_limited = torque_limited;
-                self->_last_warning        = has_warning;
-                self->apply_adaptive_feed();
-
-                // Return false if either a fault or warning is present
-                if (has_fault || has_warning) {
-                    log_warn("VFD Has Fault or Warning")
-                    return false;
-                }
-
-                return true;
-            };
+        // All three framework polling hooks share the one block read above.
+        VFDProtocol::response_parser CumarkProtocol::get_current_speed(ModbusCommand& data) {
+            return fieldbus_block_read(data);
         }
 
         VFDProtocol::response_parser CumarkProtocol::get_current_direction(ModbusCommand& data) {
-            // Repurposed to read 01.22 Motor torque (register 278, 0.1%
-            // units) for the adaptive feed control's proportional scaling --
-            // see the big comment in CumarkProtocol.h for why this needs
-            // its own poll slot rather than being merged with another read.
-            data.tx_length = 6;
-            data.rx_length = 5;
+            return fieldbus_block_read(data);
+        }
 
-            data.msg[1] = 0x03;
-            data.msg[2] = 0x01;  // register 278 = 0x0116, high byte
-            data.msg[3] = 0x16;  // low byte
-            data.msg[4] = 0x00;
-            data.msg[5] = 0x01;
-
-            return [](const uint8_t* response, VFDSpindle* vfd, VFDProtocol* detail) -> bool {
-                // Signed: torque can read negative during regenerative
-                // deceleration. We only care about magnitude here.
-                int16_t raw = (int16_t)((response[3] << 8) | response[4]);
-
-                auto* self               = static_cast<CumarkProtocol*>(detail);
-                self->_last_torque_percent = std::abs(float(raw) / 10.0f);
-                self->apply_adaptive_feed();
-
-                return true;
-            };
+        VFDProtocol::response_parser CumarkProtocol::get_status_ok(ModbusCommand& data) {
+            return fieldbus_block_read(data);
         }
 
         void CumarkProtocol::set_adaptive_feed(float goal_fraction) {
@@ -240,8 +237,15 @@ namespace Spindles {
                 // Capture whatever the operator already has dialed in right
                 // now as the baseline, so enabling this doesn't yank the
                 // override to some unrelated value.
-                _baseline_override     = sys.f_override();
-                _last_applied_override = _baseline_override;
+                _baseline_override      = sys.f_override();
+                _last_applied_override  = _baseline_override;
+                _target_override_f      = float(_baseline_override);
+                // Remember the goal as commanded by M52, so that if the
+                // operator later turns the feed override dial we can
+                // rescale the ACTIVE goal relative to it (see
+                // apply_adaptive_feed) without losing what M52 asked for.
+                _commanded_goal_percent = _adaptive_feed_goal_percent;
+                _goal_scale             = 1.0f;
                 log_info("CumarkProtocol: adaptive feed goal-seeking enabled, target torque = " << _adaptive_feed_goal_percent
                                                                                                   << "%, baseline override = "
                                                                                                   << int(_baseline_override) << "%");
@@ -256,10 +260,27 @@ namespace Spindles {
             if (target == current) {
                 return;
             }
-            sys.set_f_override(target);
-            plan_update_velocity_profile_parameters();  // force already-buffered blocks to recompute at the new override
-            _last_applied_override = target;
-            gc_ovr_changed();  // report the new override immediately rather than waiting for the next status poll
+            // THREADING: this runs in the VFD task, pinned to
+            // SUPPORT_TASK_CORE (core 0), while motion/planner code runs on
+            // core 1. We must NOT call sys.set_f_override() or touch the
+            // planner directly from here -- an earlier version did, and
+            // plan_update_velocity_profile_parameters() walks and mutates
+            // the planner block buffer while core 1 may be adding blocks
+            // and the stepper ISR is consuming them, with no locking. That
+            // is a real cross-core data race, made more likely the faster
+            // we poll. Instead hand the change to the main loop via the
+            // same event the pendant/UI override uses, which already does
+            // set_f_override() + update_velocities() + gc_ovr_changed() in
+            // the correct context. That handler takes an INCREMENT, and
+            // clamps to FeedOverride::Max (200) / ::Min (10).
+            int32_t increment = int32_t(target) - int32_t(current);
+            // FeedOverride::Default is a magic "reset to 100%" value for
+            // that handler, so avoid sending a delta of exactly +100.
+            if (increment == FeedOverride::Default) {
+                increment -= 1;
+            }
+            protocol_send_event(&feedOverrideEvent, reinterpret_cast<void*>(intptr_t(increment)));
+            _last_applied_override = Percent(int32_t(current) + increment);
             if (is_hard_trigger) {
                 log_warn("CumarkProtocol: torque limited/warning (drive-reported), feed override dropped to " << int(target) << "%");
             }
@@ -268,14 +289,31 @@ namespace Spindles {
         void CumarkProtocol::apply_adaptive_feed() {
             Percent current = sys.f_override();
 
-            // If the override differs from what we last wrote ourselves,
-            // the operator changed it via the pendant/UI in the meantime --
-            // adopt it as the new baseline rather than fighting it. This
-            // applies regardless of which tier ends up acting below.
-            if (current != _last_applied_override) {
-                _baseline_override = current;
-                log_debug("CumarkProtocol adaptive feed: operator changed override to " << int(current) << "%, adopting as new baseline");
+            // Elapsed time since the last evaluation, used to make the gains
+            // poll-rate independent (see tier 2/3 below).
+            TickType_t now  = xTaskGetTickCount();
+            float      dt_s = 0.0f;
+            if (_last_eval_ticks != 0) {
+                dt_s = float((now - _last_eval_ticks) * portTICK_PERIOD_MS) / 1000.0f;
             }
+            _last_eval_ticks = now;
+            if (dt_s <= 0.0f || dt_s > 1.0f) {
+                dt_s = 0.25f;  // first call, or a long gap (comms dropout) -- use a sane nominal
+            }
+
+            // NOTE: we deliberately do NOT try to detect operator feed-
+            // override changes by reading sys.f_override() back here. We
+            // drive the override through async events, so the live value
+            // lags what we last commanded by a poll or two -- comparing the
+            // two cannot distinguish "our own change still in flight" from
+            // "operator turned the dial". An earlier version did that and
+            // mis-attributed its own in-flight changes to the operator,
+            // ratcheting the goal down into a death spiral that stopped the
+            // feed under load and never recovered. Tier 3 below is now
+            // self-contained: it tracks only its own float target and never
+            // treats the read-back override as ground truth. (Respecting a
+            // manual override during goal-seeking needs a reliable signal
+            // from the override handler itself; that is future work.)
 
             // Absolute safety floor, except when the operator's own
             // baseline is already lower -- respect their lower choice
@@ -293,12 +331,16 @@ namespace Spindles {
             }
 
             // ---- Tier 2: aggressive overtorque slowdown -- ALWAYS active. ----
-            if (_last_torque_percent >= 95.0f) {
-                Percent step   = Percent(std::min(uint32_t(current > effective_floor ? current - effective_floor : 0),
-                                                   _adaptive_feed_aggressive_step));
+            if (_last_torque_percent >= 100.0f) {
+                uint32_t rate_step = uint32_t(float(_adaptive_feed_aggressive_step) * dt_s + 0.5f);
+                if (rate_step < 1) {
+                    rate_step = 1;  // always make some progress toward the floor
+                }
+                Percent step = Percent(std::min(uint32_t(current > effective_floor ? current - effective_floor : 0), rate_step));
                 Percent target = Percent(current - step);
-                log_debug("CumarkProtocol adaptive feed: TIER2 torque=" << _last_torque_percent << "% (>=95%) override " << int(current)
+                log_debug("CumarkProtocol adaptive feed: TIER2 torque=" << _last_torque_percent << "% (>=100%) override " << int(current)
                                                                          << "% -> " << int(target) << "%");
+                _target_override_f = float(target);  // keep accumulator in sync (see tier 1 note)
                 set_override(target, false);
                 return;
             }
@@ -311,25 +353,58 @@ namespace Spindles {
 
             float error    = _last_torque_percent - _adaptive_feed_goal_percent;
             float deadband = float(_adaptive_feed_deadband_percent);
-            float target_f = float(current);
+            // Tier 3 seeks using its own float accumulator so sub-1% per-poll
+            // steps are not truncated away. But reconcile it safely with the
+            // real override each poll, so it can never run away from reality:
+            //  - if the actual override is BELOW the accumulator, something
+            //    outside tier 3 lowered it (a hard trigger, or the operator).
+            //    Snap the accumulator down to match -- never fight a lower
+            //    override, and never command a sudden jump back up.
+            //  - if the actual override is far ABOVE the accumulator, re-sync
+            //    up to it too (e.g. operator raised it, or first run).
+            // This is a clamp, not a ratio, so it cannot feed back on itself
+            // the way the old goal-rescaling did.
+            if (_target_override_f <= 0.0f) {
+                _target_override_f = float(current);
+            }
+            if (float(current) < _target_override_f) {
+                _target_override_f = float(current);
+            } else if (float(current) > _target_override_f + 1.5f) {
+                _target_override_f = float(current);
+            }
+            float target_f = _target_override_f;
 
+            // Gains are per SECOND, scaled by the measured interval, so the
+            // closed-loop behaviour stays the same whatever poll_ms is set to.
+            // Without this the controller effectively integrates at the poll
+            // rate -- halving poll_ms would double its aggression.
             if (error > deadband) {
                 // Above goal -- back off promptly, proportional to how far over.
-                target_f = float(current) - _adaptive_feed_gain_down * (error - deadband);
+                target_f = _target_override_f - _adaptive_feed_gain_down * (error - deadband) * dt_s;
             } else if (error < -deadband) {
                 // Below goal -- recover cautiously, proportional to how far under.
-                target_f = float(current) + _adaptive_feed_gain_up * (-error - deadband);
+                target_f = _target_override_f + _adaptive_feed_gain_up * (-error - deadband) * dt_s;
             }
             // else: within the deadband, hold steady.
 
             float   min_f  = float(_adaptive_feed_min_percent);
             float   max_f  = float(_adaptive_feed_max_percent);  // can be configured above 100 -- opt-in, not default
-            Percent target = Percent(std::max(min_f, std::min(max_f, target_f)));
-            target          = std::max(target, effective_floor);
+            // Clamp the FLOAT target, then remember it across polls. The
+            // applied override is an integer (Percent), but each poll's
+            // correction can be well under 1% -- at fast poll rates it
+            // almost always is. If we rounded to int every poll the
+            // fractional part would be discarded every time and the
+            // override would never move (the "stuck at 50%" bug). So we
+            // keep the accumulated target as a float in _target_override_f
+            // and only round when handing it to set_override().
+            target_f = std::max(min_f, std::min(max_f, target_f));
+            target_f = std::max(target_f, float(effective_floor));
+            _target_override_f = target_f;
 
+            Percent target = Percent(target_f + 0.5f);  // round, don't truncate
             log_debug("CumarkProtocol adaptive feed: TIER3 torque=" << _last_torque_percent << "% goal=" << _adaptive_feed_goal_percent
-                                                                     << "% error=" << error << " override " << int(current) << "% -> "
-                                                                     << int(target) << "%");
+                                                                     << "% error=" << error << " target_f=" << target_f
+                                                                     << " override " << int(current) << "% -> " << int(target) << "%");
             set_override(target, false);
         }
 
@@ -348,7 +423,7 @@ namespace Spindles {
                     return [](const uint8_t* response, VFDSpindle* vfd, VFDProtocol* detail) -> bool {
                         uint16_t value = (response[4] << 8) | response[5];
                         auto cumark           = static_cast<CumarkProtocol*>(detail);
-                        log_debug("Max Speed is: " << (value));
+                        log_debug("Max Speed is: " << (value))
                         //cumark->_maxSpeed = value;
                         cumark->updateRPM(vfd);
                         return true;

@@ -44,12 +44,12 @@ axes:
     steps_per_mm: 640
     max_rate_mm_per_min: 4650
     acceleration_mm_per_sec2: 600
-    max_travel_mm: 490.000
+    max_travel_mm: 493.000
     soft_limits: true
     homing:
       cycle: 2
       positive_direction: false
-      mpos_mm: -490.000
+      mpos_mm: -493.000
       feed_mm_per_min: 100.000
       seek_mm_per_min: 400.000
       settle_ms: 500
@@ -149,7 +149,7 @@ probe:
   pin: gpio.34:low
   check_mode_start: true
   hard_stop: false
-  toolsetter_pin: gpio.39:high
+  toolsetter_pin: gpio.39:low
   
 
 coolant:
@@ -160,7 +160,7 @@ start:
   must_home: true
 
 atc_custom:
-  ets_mpos_mm: -14.500 -7.500 -240.000
+  ets_mpos_mm: -22 -22 -240.000
   ets_rapid_z_mpos_mm: -260
   manual_gauge_mm: 170.00
   tool1_mpos_mm: -1.100 -483.300 -176
@@ -197,9 +197,9 @@ Cumark:
   speed_map: 0=0.000% 0=3.000% 540=3.000% 18000=100.000%
   off_on_alarm: true
   adaptive_feed_floor_percent: 10
-  adaptive_feed_min_percent: 50
+  adaptive_feed_min_percent: 25
   adaptive_feed_max_percent: 150
   adaptive_feed_gain_down: 2.0
   adaptive_feed_gain_up: 0.5
-  adaptive_feed_deadband_percent: 2.5
-  adaptive_feed_aggressive_step: 25 
+  adaptive_feed_deadband_percent: 2
+  adaptive_feed_aggressive_step: 150

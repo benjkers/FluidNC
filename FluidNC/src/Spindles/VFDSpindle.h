@@ -35,7 +35,7 @@ namespace Spindles {
         int32_t  _uart_num  = -1;
         Uart*    _uart      = nullptr;
         uint8_t  _modbus_id = 1;
-        uint32_t _poll_ms   = 50;
+        uint32_t _poll_ms   = 250;
         uint32_t _retries   = 5;
 
         void setSpeed(uint32_t dev_speed);

@@ -1729,10 +1729,19 @@ Error gc_execute_line(const char* input_line) {
         // the hard-stall and overtorque tiers stay active regardless.
         spindle->set_adaptive_feed(enabled ? gc_block.values.p : 0.0f);
         if (!enabled) {
-            // Give control back to the operator immediately rather than
-            // leaving whatever override an adaptive-feed protocol (e.g.
-            // CumarkProtocol) last applied in place.
-            sys.set_f_override(FeedOverride::Default);
+            // Give control back to the operator by resetting the override to
+            // 100%. This MUST go through the event system, NOT a direct
+            // sys.set_f_override() call: the override is also driven from the
+            // VFD task (core 0) via the same event, and a direct write here
+            // (core 1) with no planner recompute corrupts the planner
+            // velocity profile -- observed as the machine continuing to move
+            // after M52 P0. protocol_do_feed_override() does the reset +
+            // update_velocities() + gc_ovr_changed() safely in main-loop
+            // context.
+            int32_t increment = int32_t(FeedOverride::Default) - int32_t(sys.f_override());
+            if (increment != 0) {
+                protocol_send_event(&feedOverrideEvent, reinterpret_cast<void*>(intptr_t(increment)));
+            }
         }
         log_info("Adaptive feed control " << (enabled ? "goal-seeking enabled, target=" : "disabled")
                                            << (enabled ? gc_block.values.p : 0.0f));

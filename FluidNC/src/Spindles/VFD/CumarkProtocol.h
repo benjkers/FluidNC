@@ -63,11 +63,28 @@ namespace Spindles {
             // ---------------------------------------------------------------
             uint32_t _adaptive_feed_floor_percent    = 25;   // absolute safety minimum, tiers 1/2/3 (10-100)
             uint32_t _adaptive_feed_min_percent      = 50;   // tier 3 lower output bound
-            uint32_t _adaptive_feed_max_percent      = 100;  // tier 3 upper output bound (can exceed 100, opt-in)
-            float    _adaptive_feed_gain_down        = 2.0f; // % override change per % torque error, above goal
-            float    _adaptive_feed_gain_up          = 0.5f; // % override change per % torque error, below goal
+            uint32_t _adaptive_feed_max_percent      = 100;  // tier 3 upper output bound; can be set up to 200 (the FeedOverride::Max hard cap), opt-in
+            float    _adaptive_feed_gain_down        = 2.0f; // % override change per % torque error per SECOND, above goal
+            float    _adaptive_feed_gain_up          = 0.5f; // % override change per % torque error per SECOND, below goal
             uint32_t _adaptive_feed_deadband_percent = 2;    // tolerance band around goal before adjusting
-            uint32_t _adaptive_feed_aggressive_step  = 20;   // tier 2 fixed step toward floor, per poll
+            uint32_t _adaptive_feed_aggressive_step  = 150;  // tier 2 drop toward floor, % override per SECOND
+
+            // Tick count at the last apply_adaptive_feed() call, used to
+            // time-scale the gains so tuning survives a poll_ms change.
+            TickType_t _last_eval_ticks = 0;
+
+            // Accumulated goal-seeking target as a float. The applied
+            // override is an integer, but per-poll corrections are often
+            // <1%; keeping the target as a float here stops that fraction
+            // being truncated away every poll (the stuck-override bug).
+            float _target_override_f = 0.0f;
+
+            // The torque goal as originally commanded by M52 Pn, and a
+            // persistent multiplier the operator applies to it by turning
+            // the feed-override dial while goal-seeking is active. Effective
+            // goal = _commanded_goal_percent * _goal_scale.
+            float _commanded_goal_percent = 0.0f;
+            float _goal_scale             = 1.0f;
 
             // Latest known values, each updated from its own poll slot (see
             // above) and combined by apply_adaptive_feed() whenever either
@@ -88,7 +105,18 @@ namespace Spindles {
             Percent _baseline_override     = FeedOverride::Default;
             Percent _last_applied_override = FeedOverride::Default;
 
+            // Consecutive polls where torque read exactly 0 while the
+            // spindle was turning -- used to warn once if drive param
+            // 50.03 Act1 src isn't pointed at P.01.22.
+            uint32_t _zero_torque_polls = 0;
+
             void apply_adaptive_feed();
+
+            // One Modbus transaction covering the whole fieldbus data set
+            // we care about (0x0004-0x0006). See the .cpp for the register
+            // map and the required drive parameters. All three polling
+            // hooks below return this, so it runs every poll.
+            response_parser fieldbus_block_read(ModbusCommand& data);
             void set_override(Percent target, bool is_hard_trigger);  // shared apply/report/log helper
 
             void direction_command(SpindleState mode, ModbusCommand& data) override;
