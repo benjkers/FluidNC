@@ -1139,6 +1139,8 @@ Error gc_execute_line(const char* input_line) {
             masterGaugeHasQ = true;
             clear_bitnum(value_words, GCodeWord::Q);
         }
+    }
+
     if (sawAdaptiveFeedWord) {  // M52 Pn -- P is required, read now that the whole line is parsed
         if (bitnum_is_false(value_words, GCodeWord::P)) {
             return Error::GcodeValueWordMissing;
@@ -1739,6 +1741,8 @@ Error gc_execute_line(const char* input_line) {
         spindle->tool_change(gc_state.selected_tool, false, false, true, masterGaugeHasQ, gc_block.values.q);
         report_ovr_counter = 0;  // Set to report change immediately
         gc_ovr_changed();
+    }
+
     if (gc_block.modal.adaptive_feed != gc_state.modal.adaptive_feed) {  // M52 Pn
         gc_state.modal.adaptive_feed = gc_block.modal.adaptive_feed;
         bool enabled                 = gc_state.modal.adaptive_feed == AdaptiveFeed::Enable;

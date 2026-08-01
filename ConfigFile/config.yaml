@@ -2,7 +2,7 @@ board: 6x CNC Controller
 name: 6x Default
 
 arc_tolerance_mm: 0.002
-junction_deviation_mm: 0.010
+junction_deviation_mm: 0.020
 report_inches: false
 
 stepping:
@@ -16,8 +16,8 @@ axes:
 
   x:
     steps_per_mm: 640
-    max_rate_mm_per_min: 4650
-    acceleration_mm_per_sec2: 600
+    max_rate_mm_per_min: 4600
+    acceleration_mm_per_sec2: 1200
     max_travel_mm: 484.000
     soft_limits: true
     homing:
@@ -42,8 +42,8 @@ axes:
 
   y:
     steps_per_mm: 640
-    max_rate_mm_per_min: 4650
-    acceleration_mm_per_sec2: 600
+    max_rate_mm_per_min: 4600
+    acceleration_mm_per_sec2: 1200
     max_travel_mm: 493.000
     soft_limits: true
     homing:
@@ -68,8 +68,8 @@ axes:
 
   z:
     steps_per_mm: 640
-    max_rate_mm_per_min: 4400
-    acceleration_mm_per_sec2: 600
+    max_rate_mm_per_min: 4000
+    acceleration_mm_per_sec2: 1200
 
     max_travel_mm: 275.000
     soft_limits: true
@@ -94,8 +94,8 @@ axes:
         
   b:
     steps_per_mm: 55.555
-    max_rate_mm_per_min: 3800
-    acceleration_mm_per_sec2: 400
+    max_rate_mm_per_min: 2600
+    acceleration_mm_per_sec2: 800
 
     motor0:
       standard_stepper:
@@ -131,14 +131,14 @@ control:
 
 macros:
   startup_line0: g21 
-  startup_line1: 
+  startup_line1: $message/level=error
   macro0: 
   macro1: 
   macro2:
   macro3:
-  after_homing: 
-  after_reset:
-  after_unlock:
+  after_homing: M52P0
+  after_reset: M52P0
+  after_unlock: M52P0
 
 user_outputs:
   digital0_pin: gpio.12
@@ -160,22 +160,21 @@ start:
   must_home: true
 
 atc_custom:
-  ets_mpos_mm: -22 -22 -240.000
-  ets_rapid_z_mpos_mm: -260
-  manual_gauge_mm: 170.00
-  tool1_mpos_mm: -1.100 -483.300 -176
-  tool1_gauge_mm: 95
-  tool2_mpos_mm: -100.200 -483.300 -174.5
-  tool2_gauge_mm: 90
-  tool3_mpos_mm: -198.100 -484.300 -173.1
-  tool3_gauge_mm: 90
-  tool4_mpos_mm: -283.800 -484.700 -172.8
-  tool4_gauge_mm: 95
-  tool5_mpos_mm: -380.000 -484.700 -172.9
-  tool5_gauge_mm: 90
-  tool6_mpos_mm: -477.200 -484.700 -172.3
-  tool6_gauge_mm: 125
-  tool_holder_pulloff_mm: 0.000 35.000 15.000 
+  ets_mpos_mm: -22.000 -22.000 -293.000
+  ets_rapid_z_offset_mm: 10.000
+  ets_probe_overtravel_mm: 4.000
+  gauge_line_length_mm: 63.666
+  manual_gauge_range_mm: 25.000 200.000
+  tool_holder_pulloff_mm: 0.0 35.0 15.0 0.0 0.0 0.0
+  first_tool_number: 2
+  tool_count: 6              
+  gauge_filename: "Tool_Gauges_Lengths.txt" 
+  slot1_mpos_mm: -1.100 -483.300 -176
+  slot2_mpos_mm: 100.200 -483.300 -174.5
+  slot3_mpos_mm: -198.100 -484.300 -173.1
+  slot4_mpos_mm: -283.800 -484.700 -172.8
+  slot5_mpos_mm: -380.000 -484.700 -172.9
+  slot6_mpos_mm: -477.200 -484.700 -172.3
 
 
   
@@ -188,7 +187,7 @@ uart1:
 
 Cumark:
   atc: atc_custom
-  poll_ms: 50
+  poll_ms: 100
   uart_num: 1
   modbus_id: 1
   tool_num: 0

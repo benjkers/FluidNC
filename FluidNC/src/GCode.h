@@ -204,6 +204,9 @@ enum class BreakDetection : bool {
 // M101 Tn - (re)master an ATC rack tool's gauge length. Part of the
 // M100-M199 "user defined" range (Modal Group MM10).
 enum class MasterGauge : bool {
+    Disable = 0,
+    Enable  = 1,
+};
 // M52 Pn - LinuxCNC-style adaptive feed control enable/disable. Shares
 // Modal Group MM9 ("Override control") with M56, per the NIST RS274NGC
 // spec's own grouping of override-related M-codes.

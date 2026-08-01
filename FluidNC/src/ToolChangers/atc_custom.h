@@ -91,13 +91,25 @@ namespace ATCs {
         // ------------------------ config items ------------------------
         std::vector<float> _ets_mpos           = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
         std::vector<float> _manual_change_mpos  = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-        float              _manual_gauge       = 100.0;  // approach estimate for tools with no stored gauge yet
-        float              _ets_rapid_z_mpos   = 0;
+        std::vector<float> _manual_gauge        = { 25.0, 200.0 };  // minimum and maximum tool gauge length for manual tool change, used for safe rapid approach to the toolsetter
+        // Clearance height ABOVE the toolsetter top surface at which the
+        // TOOL TIP may be rapided. Applied to the tip; converted to a
+        // spindle-nose Z by adding the tool gauge length.
+        float              _ets_rapid_z_offset = 5.0;
         std::vector<float> _tool_holder        = { 0.0, -60, 60, 0.0, 0.0, 0.0 };
+
+        // How far BELOW the toolsetter top surface (ets_mpos_mm Z) the
+        // final G38.2 measurement move is allowed to travel before it is
+        // treated as a failed probe. The setter should always trigger
+        // well before this; it is a safety limit, not a target. Positive
+        // value = millimetres of permitted over-travel past the surface.
+        float              _ets_probe_overtravel = 10.0;
 
         // T100's known, fixed, physical gauge length (spindle-end to tip).
         // This is a config constant -- it is NEVER measured or persisted.
-        float _gauge_setter_length = 0.0;
+        // T100 reference-tool gauge length (the "gauge line" length),
+        // spindle-nose to tip. Known physical constant, never measured.
+        float _gauge_setter_length = 63.666;
 
         // T-number of the first rack pocket (e.g. 2, so T2..T(2+tool_count-1)
         // are rack tools). Change this to move/expand the rack range without
@@ -165,11 +177,11 @@ namespace ATCs {
         //   gauge(tool) = gauge_setter_length + (raw_z - ets_reference_probe_z)
         float absolute_gauge_from_probe(float raw_z) const { return _gauge_setter_length + (raw_z - _ets_reference_probe_z); }
 
-        // TLO(tool) = gauge_length(tool) - gauge_length(T1). Combined into
+        // TLO(tool) = absolute gauge_length(tool). Combined into
         // one constant so it can be embedded directly into gcode as a
         // literal when a tool is freshly probed:
         //   TLO = raw_z + tlo_constant()
-        float tlo_constant() const { return _gauge_setter_length - _ets_reference_probe_z - _probe_gauge_length; }
+        float tlo_constant() const { return _gauge_setter_length - _ets_reference_probe_z; }
 
         // Inverse of absolute_gauge_from_probe(): given a stored absolute
         // gauge length, what raw toolsetter Z would we expect to read if we
@@ -188,13 +200,13 @@ namespace ATCs {
         // safely, since a wrong estimate is caught by the probe trigger
         // rather than crashing; (3) the existing precision measurement.
         // Leaves the final result in #5063.
-        void probe_toolsetter_raw(float approach_gauge_estimate);
-        // Same three stages, but for tools whose approach estimate isn't
-        // known in C++ at macro-build time (manual/non-rack tools) -- the
-        // post processor sets #<_fusion_tool_gauge> on the line before M6,
-        // and this looks it up in gcode at runtime, falling back to
-        // manual_gauge if the post didn't provide one.
-        void probe_toolsetter_dynamic();
+        // Single unified toolsetter probe. approach_gauge_estimate is this
+        // tool's best-known gauge length for a close, safe rapid; pass 0 to
+        // fall back to manual_gauge. If use_dynamic_fusion_gauge is true,
+        // the stage-2 approach instead reads #<_fusion_tool_gauge> at
+        // runtime (for manual/non-rack tools whose gauge isn't known in
+        // C++ at macro-build time), falling back to manual_gauge.
+        void probe_toolsetter(float approach_gauge_estimate, bool use_dynamic_fusion_gauge = false);
         void reset();
         void drop_tool(uint8_t slot);
         void pick_tool(uint8_t slot);
@@ -224,9 +236,10 @@ namespace ATCs {
 
         void group(Configuration::HandlerBase& handler) override {
             handler.item("ets_mpos_mm", _ets_mpos);
-            handler.item("manual_gauge_mm", _manual_gauge);
-            handler.item("ets_rapid_z_mpos_mm", _ets_rapid_z_mpos);
-            handler.item("gauge_setter_length_mm", _gauge_setter_length);
+            handler.item("manual_gauge_range_mm", _manual_gauge);
+            handler.item("ets_rapid_z_offset_mm", _ets_rapid_z_offset);
+            handler.item("ets_probe_overtravel_mm", _ets_probe_overtravel, 0.5f, 100.0f);
+            handler.item("gauge_line_length_mm", _gauge_setter_length);
             handler.item("first_tool_number", _first_tool_number, 2, 250);
             handler.item("tool_count", _tool_count, 0, uint32_t(MAX_TOOL_SLOTS));
             handler.item("gauge_filename", _gauge_filename);
