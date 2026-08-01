@@ -1,12 +1,22 @@
+/**
+  Copyright (C) 2012-2026 by Autodesk, Inc.
+  All rights reserved.
 
+  Grbl post processor configuration.
 
-description = "FluidNC";
-vendor = "MechTech Inovations";
-vendorUrl = "https://github.com/benjkers/FluidNC";
-longDescription = "FluidNC is a post processor for Fusion 360 that generates G-code compatible with the FluidNC firmware. It supports milling, probing, and multi-axis operations, providing options for adaptive feed control, safe retracts, and tool management.";
+  $Revision: 44229 e780fd31175d3ecc1f0eb61106a1f48cbb5c06bf $
+  $Date: 2026-06-12 11:32:13 $
+
+  FORKID {154F7C00-6549-4c77-ADE0-79375FE5F2AA}
+*/
+
+description = "Grbl";
+vendor = "grbl";
+vendorUrl = "https://github.com/gnea/grbl/wiki";
+longDescription = "Generic milling post for Grbl. Use 'Split file' property to split files by tool for tool changes.";
 
 // >>>>> INCLUDED FROM ../common/grbl.cps
-legal = "Copyright (C) 2012-2024 by Autodesk, Inc.";
+legal = "Copyright (C) 2012-2026 by Autodesk, Inc.";
 certificationLevel = 2;
 minimumRevision = 45917;
 
@@ -14,7 +24,7 @@ extension = "nc";
 setCodePage("ascii");
 
 capabilities = CAPABILITY_MILLING | CAPABILITY_MACHINE_SIMULATION;
-tolerance = spatial(0.001, MM);
+tolerance = spatial(0.002, MM);
 if (typeof revision == "number" && typeof supportedFeatures != "undefined") {
   supportedFeatures |= revision >= 50328 ? FEATURE_MACHINE_ROTARY_ANGLES : 0;
 }
@@ -30,29 +40,6 @@ highFeedrate = (unit == MM) ? 5000 : 200;
 
 // user-defined properties
 properties = {
-  // PER-OPERATION property. Note this lives inside the normal properties
-  // object and is marked scope:"operation" -- it is NOT in a separate
-  // operationProperties = {} object. Using that separate object caused
-  // Fusion to silently suppress this entire properties list; this pattern
-  // (verified against a working production Okuma post) does not.
-  adaptiveFeedGoal: {
-    title      : "Adaptive feed target torque %",
-    description: "Torque-based adaptive feed control (M52) target for this operation, as a percentage of rated torque. The feed override is scaled continuously to hold this target -- not stepped -- so it converges smoothly rather than hunting. 0 disables goal-seeking for this operation; the machine's hard-stall and overtorque protections stay active regardless, independent of this setting. The firmware clamps to 90% max. Defaults to a deliberately low, fail-safe value: if you forget to raise it, the machine runs conservatively slow rather than risk overload/breaking a tool.",
-    group      : "operationProps",
-    type       : "integer",
-    value      : 5,
-    range      : [0, 90],
-    scope      : "operation",
-    enabled    : ["milling", "drilling"]
-  },
-  homeXYOnRotary: {
-    title      : "Home XY on 4th/5th axis moves",
-    description: "Retracts to machine home in X and Y (in addition to the Z retract that always happens) before any 4th/5th axis repositioning move. Use this when tall or off-centre work on the rotary axis could swing into the spindle or column as it indexes. The retract uses whatever 'Safe Retracts' method is selected above.",
-    group      : "homePositions",
-    type       : "boolean",
-    value      : true,
-    scope      : "post"
-  },
   safePositionMethod: {
     title      : "Safe Retracts",
     description: "Select your desired retract option. 'Clearance Height' retracts to the operation clearance height.",
@@ -63,7 +50,7 @@ properties = {
       {title:"G53", id:"G53"},
       {title:"Clearance Height", id:"clearanceHeight"}
     ],
-    value: "G53",
+    value: "G28",
     scope: "post"
   },
   showSequenceNumbers: {
@@ -103,24 +90,37 @@ properties = {
     description: "Adds spaces between words if 'yes' is selected.",
     group      : "formats",
     type       : "boolean",
+    value      : true,
+    scope      : "post"
+  },
+  useToolCall: {
+    title      : "Output tool number",
+    description: "Disable to disallow the output of tool numbers (Txx).",
+    group      : "preferences",
+    type       : "boolean",
+    value      : true,
+    scope      : "post"
+  },
+  useM06: {
+    title      : "Output M6",
+    description: "Disable to disallow the output of M6 on tool changes.",
+    group      : "preferences",
+    type       : "boolean",
     value      : false,
     scope      : "post"
   },
-  outputToolChange: {
-    title      : "Output tool change (Tn M6)",
-    description: "Outputs the tool number and M6 together on every tool change (e.g. 'T2 M6'). FluidNC's tool changer needs both together to work at all -- M6 is what actually triggers a tool change, and the T-number tells it which tool -- so these used to be two separate properties that could be set inconsistently (e.g. M6 off with the tool number still on, silently breaking every tool change with no output to show why). Disable only if you don't want any tool-change output at all (e.g. single-tool jobs).",
+  splitFile: {
+    title      : "Split file",
+    description: "Select your desired file splitting option.",
     group      : "preferences",
-    type       : "boolean",
-    value      : true,
-    scope      : "post"
-  },
-  outputToolLengthCheck: {
-    title      : "Tool length check",
-    description: "'Yes' outputs the tool gauge length safety check (CheckToolGauge.nc) after every tool change. 'No' still outputs #<_fusion_tool_gauge> (used for a safe toolsetter approach on manual tools) but skips the verification/alarm call.",
-    group      : "preferences",
-    type       : "boolean",
-    value      : true,
-    scope      : "post"
+    type       : "enum",
+    values     : [
+      {title:"No splitting", id:"none"},
+      {title:"Split by tool", id:"tool"},
+      {title:"Split by toolpath", id:"toolpath"}
+    ],
+    value: "none",
+    scope: "post"
   }
 };
 
@@ -131,6 +131,8 @@ wcsDefinitions = {
     {name:"Standard", format:"G", range:[54, 59]}
   ]
 };
+
+var subprograms = new Array();
 
 var gFormat = createFormat({prefix:"G", decimals:0});
 var mFormat = createFormat({prefix:"M", decimals:0});
@@ -189,7 +191,7 @@ var settings = {
   retract: {
     cancelRotationOnRetracting: false, // specifies that rotations (G68) need to be canceled prior to retracting
     methodXY                  : undefined, // special condition, overwrite retract behavior per axis
-    methodZ                   : undefined, // was hardcoded "G28", which silently overrode the "Safe Retracts" property for every Z retract -- undefined lets that property apply
+    methodZ                   : "G28", // special condition, overwrite retract behavior per axis
     useZeroValues             : ["G28", "G30"], // enter property value id(s) for using "0" value instead of machineConfiguration axes home position values (ie G30 Z0)
     homeXY                    : {onIndexing:false, onToolChange:false, onProgramEnd:{axes:[X, Y]}} // Specifies when XY should be homed in XY (sample: onIndexing:[X,Y]). Options can be combined
   },
@@ -235,15 +237,6 @@ function onOpen() {
     setWordSeparator("");
   }
 
-  // Home XY on rotary indexing, if enabled. The Z retract before an
-  // indexing move already happens unconditionally in setWorkPlane(); this
-  // adds the XY home on top of it. Uses the {axes:[...]} form to match
-  // homeXY.onProgramEnd -- getRetractParameters() reads arguments[0].axes,
-  // so a bare [X, Y] array would not work here.
-  if (getProperty("homeXYOnRotary")) {
-    settings.retract.homeXY.onIndexing = {axes:[X, Y]};
-  }
-
   if (programName) {
     writeComment(programName);
   }
@@ -251,6 +244,11 @@ function onOpen() {
     writeComment(programComment);
   }
   writeProgramHeader();
+
+  if (getProperty("splitFile") != "none") {
+    writeComment(localize("***THIS FILE DOES NOT CONTAIN NC CODE***"));
+    return;
+  }
 
   // absolute coordinates and feed per min
   writeProgramStart();
@@ -269,8 +267,9 @@ function onSection() {
   var forceSectionRestart = optionalSection && !currentSection.isOptional();
   optionalSection = currentSection.isOptional();
   var insertToolCall = isToolChangeNeeded("number") || forceSectionRestart;
-  var newWorkOffset = isNewWorkOffset() || forceSectionRestart;
-  var newWorkPlane = isNewWorkPlane() || forceSectionRestart || (typeof defineWorkPlane == "function" &&
+  var splitHere = getProperty("splitFile") == "toolpath" || (getProperty("splitFile") == "tool" && insertToolCall);
+  var newWorkOffset = isNewWorkOffset() || splitHere || forceSectionRestart;
+  var newWorkPlane = isNewWorkPlane() || splitHere || forceSectionRestart || (typeof defineWorkPlane == "function" &&
     Vector.diff(defineWorkPlane(getPreviousSection(), false), defineWorkPlane(currentSection, false)).length > 1e-4);
 
   if (insertToolCall || newWorkOffset || newWorkPlane || state.tcpIsActive || currentSection.isMultiAxis()) {
@@ -278,7 +277,9 @@ function onSection() {
       onCommand(COMMAND_COOLANT_OFF); // turn off coolant before retract during tool change
       onCommand(COMMAND_STOP_SPINDLE); // stop spindle before retract during tool change
     }
-    writeRetract(Z); // retract
+    if (getProperty("splitFile") == "none") {
+      writeRetract(Z); // retract
+    }
     if (isFirstSection()) {
       cancelWorkPlane(machineConfiguration.isMultiAxisConfiguration() && settings.workPlaneMethod.useTiltedWorkplane);
       if (machineConfiguration.isMultiAxisConfiguration()) {
@@ -294,6 +295,47 @@ function onSection() {
 
   writeln("");
 
+  if (splitHere) {
+    if (!isFirstSection()) {
+      writeProgramEnd();
+    }
+
+    var subprogram;
+    if (getProperty("splitFile") == "toolpath") {
+      var comment;
+      if (hasParameter("operation-comment")) {
+        comment = getParameter("operation-comment");
+      } else {
+        comment = getCurrentSectionId();
+      }
+      subprogram = programName + "_" + (subprograms.length + 1) + "_" + comment + "_" + "T" + tool.number;
+    } else {
+      subprogram = programName + "_" + (subprograms.length + 1) + "_" + "T" + tool.number;
+    }
+
+    // var index = 0;
+    // var _subprogram = subprogram;
+    // while (subprograms.indexOf(_subprogram) !== -1) {
+    //   index++;
+    //   _subprogram = subprogram + "_" + index;
+    // }
+    // subprogram = _subprogram;
+    subprograms.push(subprogram);
+    var path = FileSystem.getCombinedPath(FileSystem.getFolderPath(getOutputPath()), String(subprogram).replace(/[<>:"/\\|?*]/g, "") + "." + extension);
+    writeComment(localize("Load tool number " + tool.number + " and subprogram " + subprogram));
+    redirectToFile(path);
+
+    if (programName) {
+      writeComment(programName);
+    }
+    if (programComment) {
+      writeComment(programComment);
+    }
+
+    // absolute coordinates and feed per min
+    writeProgramStart();
+  }
+
   writeComment(getParameter("operation-comment", ""));
 
   // tool change
@@ -303,31 +345,7 @@ function onSection() {
     }
     writeToolCall(tool, insertToolCall);
   }
-  startSpindle(tool, insertToolCall);
-
-  // Adaptive feed control (M52) -- per-operation torque-goal, see
-  // the adaptiveFeedGoal property above -- a scope:"operation" integer
-  // percentage (0-90), read per-section so each toolpath can differ.
-  // M52 Pn itself takes a 0-0.9 FRACTION, converted in setAdaptiveFeed().
-  // The actual M52 lines are emitted by updateAdaptiveFeedForMovement()
-  // as moves transition between cutting and non-cutting, not here. The
-  // firmware clamps the fraction to 0.9 max and treats 0 as "disable
-  // goal-seeking" -- the hard-stall and overtorque protections stay
-  // active regardless.
-  var adaptiveFeedGoalPercent;
-  if (currentSection.properties && currentSection.properties.adaptiveFeedGoal !== undefined) {
-    adaptiveFeedGoalPercent = parseInt(currentSection.properties.adaptiveFeedGoal, 10);
-  } else {
-    adaptiveFeedGoalPercent = parseInt(getProperty("adaptiveFeedGoal", 0), 10);
-  }
-  if (isNaN(adaptiveFeedGoalPercent)) {
-    adaptiveFeedGoalPercent = 0;
-  }
-  currentAdaptiveFeedGoal = adaptiveFeedGoalPercent;
-  // Always start an operation with adaptive feed off -- the approach and
-  // lead-in happen first, and updateAdaptiveFeedForMovement() turns it on
-  // when real cutting begins.
-  setAdaptiveFeed(false);
+  startSpindle(tool, insertToolCall || splitHere);
 
   // Output modal commands here
   writeBlock(gPlaneModal.format(17), gAbsIncModal.format(90), gFeedModeModal.format(94));
@@ -363,99 +381,6 @@ function onSpindleSpeed(spindleSpeed) {
   writeBlock(sOutput.format(spindleSpeed));
 }
 
-// ---------------------------------------------------------------------
-// Native Fusion probing cycles (Setup > Probe / Probe toolpaths)
-//
-// Fusion posts these through onCyclePoint(x, y, z) with the cycle type in
-// the global `cycleType`/`cycle` object. Anything we don't explicitly
-// handle here falls through to expandCyclePoint(), same as normal
-// drilling cycles (FluidNC has no native canned cycles, so those are
-// already expanded into plain moves -- this is the same mechanism).
-//
-// The actual probe motion + math lives in Macros/Probe*Edge.nc /
-// ProbeZSurface.nc on the SD card, not here -- this function just sets
-// the named parameters those macros expect and calls them via $SD/Run=.
-// Currently implemented: probing-x, probing-y, probing-z,
-// probing-xy-outer-corner, probing-xy-inner-corner.
-// ---------------------------------------------------------------------
-
-// Captured via onParameter below -- Fusion's "probe measure" feed rate,
-// used for the second (accurate) touch. Falls back to a fraction of the
-// cycle's normal probe feed if the operation didn't set one.
-var probeFeedSlow = undefined;
-
-function onParameter(name, value) {
-  if (name == "operation:tool_feedProbeMeasure") {
-    probeFeedSlow = value;
-  }
-}
-
-function probeAxisEdge(axis, dir) {
-  var slowFeed = probeFeedSlow ? probeFeedSlow : cycle.feedrate / 4;
-  writeBlock("#<_probe_axis_dir>=" + dir);
-  writeBlock("#<_probe_clearance>=" + xyzFormat.format(cycle.probeClearance));
-  writeBlock("#<_probe_overtravel>=" + xyzFormat.format(cycle.probeOvertravel));
-  writeBlock("#<_probe_feed_fast>=" + feedFormat.format(cycle.feedrate));
-  writeBlock("#<_probe_feed_slow>=" + feedFormat.format(slowFeed));
-  writeBlock("#<_probe_tool_radius>=" + xyzFormat.format(tool.diameter / 2));
-  writeBlock("$SD/Run=Probe" + axis + "Edge.nc");
-}
-
-function probeZSurface() {
-  var slowFeed = probeFeedSlow ? probeFeedSlow : cycle.feedrate / 4;
-  var clearance = (cycle.clearance !== undefined) ? cycle.clearance : cycle.probeClearance;
-  writeBlock("#<_probe_clearance>=" + xyzFormat.format(clearance));
-  writeBlock("#<_probe_overtravel>=" + xyzFormat.format(cycle.probeOvertravel));
-  writeBlock("#<_probe_feed_fast>=" + feedFormat.format(cycle.feedrate));
-  writeBlock("#<_probe_feed_slow>=" + feedFormat.format(slowFeed));
-  writeBlock("$SD/Run=ProbeZSurface.nc");
-}
-
-function onCyclePoint(x, y, z) {
-  if (!isProbeOperation()) {
-    expandCyclePoint(x, y, z);
-    return;
-  }
-
-  switch (cycleType) {
-  case "probing-x":
-    writeComment("Probing X edge");
-    probeAxisEdge("X", (cycle.approach1 == "positive") ? 1 : -1);
-    break;
-  case "probing-y":
-    writeComment("Probing Y edge");
-    probeAxisEdge("Y", (cycle.approach1 == "positive") ? 1 : -1);
-    break;
-  case "probing-z":
-    writeComment("Probing Z surface");
-    probeZSurface();
-    break;
-  case "probing-xy-outer-corner":
-  case "probing-xy-inner-corner":
-    // Two single-axis touches: reposition to be aligned with the corner
-    // on one axis, offset by the standoff on the other, probe X; then
-    // the mirror image for Y. This is the part of native probing most
-    // worth double-checking in Fusion's simulation before cutting --
-    // the exact approach-point geometry Fusion assumes isn't something
-    // I could verify against a real Fusion session.
-    writeComment("Probing XY corner (" + cycleType + ")");
-    var dirX = (cycle.approach1 == "positive") ? 1 : -1;
-    var dirY = (cycle.approach2 == "positive") ? 1 : -1;
-    var standoff = cycle.probeClearance + tool.diameter / 2;
-    writeBlock(gMotionModal.format(0), xOutput.format(x - dirX * standoff), yOutput.format(y));
-    probeAxisEdge("X", dirX);
-    writeBlock(gMotionModal.format(0), xOutput.format(x), yOutput.format(y - dirY * standoff));
-    probeAxisEdge("Y", dirY);
-    writeComment("XY corner probed");
-    break;
-  default:
-    var msg = "Probe cycle '" + cycleType + "' is not implemented in this post -- skipping.";
-    writeComment(msg);
-    warning(msg);
-    break;
-  }
-}
-
 function forceCircular(plane) {
   switch (plane) {
   case PLANE_XY:
@@ -480,7 +405,6 @@ function forceCircular(plane) {
 }
 
 function onCircular(clockwise, cx, cy, cz, x, y, z, feed) {
-  updateAdaptiveFeedForMovement();
   // one of X/Y and I/J are required and likewise
 
   if (pendingRadiusCompensation >= 0) {
@@ -562,24 +486,17 @@ function onCommand(command) {
     writeBlock(sOutput.format(spindleSpeed), mFormat.format(tool.clockwise ? 3 : 4));
     return;
   case COMMAND_LOAD_TOOL:
-    // T100 is the known-gauge-length reference/calibration tool -- it
-    // doesn't have a comparable "expected" gauge length from Fusion in the
-    // same sense as a real cutting tool, so it's excluded here.
-    if (tool.number != 100) {
-      writeBlock("#<_fusion_tool_gauge>=" + xyzFormat.format(getBodyLength(tool)));
-    }
-    if (getProperty("outputToolChange")) {
-      writeToolBlock("T" + toolFormat.format(tool.number), mFormat.format(6));
+    if (getProperty("useToolCall")) {
+      writeToolBlock("T" + toolFormat.format(tool.number), conditional(getProperty("useM06"), mFormat.format(6)));
+      if (!isFirstSection() && !getProperty("useM06")) {
+        writeComment(localize("CHANGE TO T") + tool.number);
+      }
+    } else if (getProperty("useM06")) {
+      writeToolBlock(mFormat.format(6));
     } else {
       machineSimulation({mode:TOOLCHANGE}); // simulate tool change
     }
     writeComment(tool.comment);
-    if (tool.number != 100 && getProperty("outputToolLengthCheck")) {
-      // Compares #<_fusion_tool_gauge> above against whatever the machine
-      // has recorded (a mastered rack tool) or just measured (a manual
-      // tool) for the tool now in the spindle -- see Macros/CheckToolGauge.nc
-      writeBlock("$SD/Run=CheckToolGauge.nc");
-    }
     return;
   case COMMAND_LOCK_MULTI_AXIS:
     if (machineConfiguration.isMultiAxisConfiguration()) {
@@ -598,15 +515,8 @@ function onCommand(command) {
     }
     return;
   case COMMAND_BREAK_CONTROL:
-    writeBlock("$SD/Run=BreakDetection.nc");
     return;
   case COMMAND_TOOL_MEASURE:
-    // Fires from a Manual NC "Measure Tool" step in the Fusion timeline.
-    // Re-probes/re-stores the gauge length of whatever tool is currently
-    // in the spindle -- a no-op (with a logged error) if it's not a rack
-    // tool or isn't the tool actually loaded. See atc_custom.cpp's M101.
-    writeBlock("M101 T" + toolFormat.format(tool.number));
-    writeComment(localize("MEASURE TOOL " + tool.number));
     return;
   }
 
@@ -652,10 +562,6 @@ function writeProgramEnd() {
 
 function onClose() {
   optionalSection = false;
-  // Don't leave adaptive feed control active for whatever runs after this
-  // job (manual MDI moves, the next unrelated program, etc.).
-  currentAdaptiveFeedGoal = 0;
-  setAdaptiveFeed(false);
   writeln("");
   writeProgramEnd();
 }
@@ -677,37 +583,6 @@ var validateLengthCompensation = getSetting("outputToolLengthCompensation", true
 var multiAxisFeedrate;
 var sequenceNumber;
 var optionalSection = false;
-// ---------------------------------------------------------------------
-// Adaptive feed (M52) state.
-//
-// currentAdaptiveFeedGoal is this operation's target, set in onSection.
-// adaptiveFeedActive tracks whether M52 is currently ENABLED in the
-// output stream. Adaptive feed is deliberately suppressed during every
-// non-cutting move -- rapids, lead in/out, plunges, ramps and link moves
-// -- and only enabled once actual cutting starts. Without this, torque
-// reads ~0 during an air move, so the goal-seeking controller ramps the
-// override UP chasing its target and the tool then enters the cut at a
-// high override. Re-enabling only on real cutting moves avoids that.
-var currentAdaptiveFeedGoal = 0;
-var adaptiveFeedActive = false;
-
-function setAdaptiveFeed(on) {
-  if (on == adaptiveFeedActive) {
-    return; // no change, don't spam M52
-  }
-  writeBlock("M52 P" + (on ? xyzFormat.format(currentAdaptiveFeedGoal / 100) : "0"));
-  adaptiveFeedActive = on;
-}
-
-// Called at the top of every motion handler. `movement` is the kernel's
-// current move classification.
-function updateAdaptiveFeedForMovement() {
-  if (currentAdaptiveFeedGoal <= 0) {
-    return; // goal-seeking off for this operation entirely
-  }
-  var isCutting = (movement == MOVEMENT_CUTTING) || (movement == MOVEMENT_FINISH_CUTTING);
-  setAdaptiveFeed(isCutting);
-}
 var currentWorkOffset;
 var forceSpindleSpeed = false;
 var operationNeedsSafeStart = false; // used to convert blocks to optional for safeStartAllOperations
@@ -1152,7 +1027,7 @@ function getRetractParameters() {
   var singleLine = arguments[0].singleLine == undefined ? true : arguments[0].singleLine;
   var words = []; // store all retracted axes in an array
   var retractAxes = new Array(false, false, false);
-  var method = getProperty("safePositionMethod", "G53");  // fallback matches our configured default -- "undefined" here previously crashed Simulate when the property wasn't populated yet
+  var method = getProperty("safePositionMethod", "undefined");
   if (method == "clearanceHeight") {
     if (!is3D()) {
       error(localize("Safe retract option 'Clearance Height' is only supported when all operations are along the setup Z-axis."));
@@ -2023,7 +1898,6 @@ Matrix.getOrientationFromDirection = function (ijk) {
 // <<<<< INCLUDED FROM include_files/initialPositioning_fanuc.cpi
 // >>>>> INCLUDED FROM include_files/onRapid_fanuc.cpi
 function onRapid(_x, _y, _z) {
-  updateAdaptiveFeedForMovement();
   var x = xOutput.format(_x);
   var y = yOutput.format(_y);
   var z = zOutput.format(_z);
@@ -2039,7 +1913,6 @@ function onRapid(_x, _y, _z) {
 // <<<<< INCLUDED FROM include_files/onRapid_fanuc.cpi
 // >>>>> INCLUDED FROM include_files/onLinear_fanuc.cpi
 function onLinear(_x, _y, _z, feed) {
-  updateAdaptiveFeedForMovement();
   if (pendingRadiusCompensation >= 0) {
     xOutput.reset();
     yOutput.reset();
@@ -2077,7 +1950,6 @@ function onLinear(_x, _y, _z, feed) {
 // <<<<< INCLUDED FROM include_files/onLinear_fanuc.cpi
 // >>>>> INCLUDED FROM include_files/onRapid5D_fanuc.cpi
 function onRapid5D(_x, _y, _z, _a, _b, _c) {
-  updateAdaptiveFeedForMovement();
   if (pendingRadiusCompensation >= 0) {
     error(localize("Radius compensation mode cannot be changed at rapid traversal."));
     return;
@@ -2100,7 +1972,6 @@ function onRapid5D(_x, _y, _z, _a, _b, _c) {
 // <<<<< INCLUDED FROM include_files/onRapid5D_fanuc.cpi
 // >>>>> INCLUDED FROM include_files/onLinear5D_fanuc.cpi
 function onLinear5D(_x, _y, _z, _a, _b, _c, feed, feedMode) {
-  updateAdaptiveFeedForMovement();
   if (pendingRadiusCompensation >= 0) {
     error(localize("Radius compensation cannot be activated/deactivated for 5-axis move."));
     return;

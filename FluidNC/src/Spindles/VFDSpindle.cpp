@@ -36,6 +36,12 @@ namespace Spindles {
 
     // ================== Class methods ==================================
 
+    void VFDSpindle::set_adaptive_feed(float goal_fraction) {
+        if (detail_) {
+            detail_->set_adaptive_feed(goal_fraction);
+        }
+    }
+
     void VFDSpindle::init() {
         _sync_dev_speed = 0;
         _syncing        = false;
@@ -236,7 +242,7 @@ namespace Spindles {
         }
         handler.item("modbus_id", _modbus_id, 0, 247);  // per https://modbus.org/docs/PI_MBUS_300.pdf
         handler.item("debug", _debug, 0, 5);
-        handler.item("poll_ms", _poll_ms, 250, 20000);
+        handler.item("poll_ms", _poll_ms, 50, 20000);  // was min 250; lowered so load-sensing protocols (e.g. Cumark adaptive feed) can poll faster. Mind your baud rate -- each poll is a full Modbus round trip.
         handler.item("retries", _retries);
 
         Spindle::group(handler);

@@ -56,6 +56,7 @@ gc_modal_t modal_defaults = {
     ToolChange::Disable,
     SetToolNumber::Disable,
     MasterGauge::Disable,
+    AdaptiveFeed::Disable,
     IoControl::None,
     Override::ParkingMotion
 };
@@ -283,6 +284,7 @@ Error gc_execute_line(const char* input_line) {
     bool nonmodalG38          = false;  // Used for G38.6-9
     bool isWaitOnInputDigital = false;
     bool masterGaugeHasQ      = false;  // M101 Tn Qvalue - was Q provided?
+    bool sawAdaptiveFeedWord  = false;  // M52 Pn - was M52 present on this line?
 
     auto    n_axis = Axes::_numberAxis;
     float   coord_data[MAX_N_AXIS];  // Used by WCO-related commands
@@ -700,6 +702,16 @@ Error gc_execute_line(const char* input_line) {
                                 break;
                         }
                         mg_word_bit = ModalGroup::MM8;
+                        break;
+                    case 52:  // M52 Pn - adaptive feed control enable/disable (LinuxCNC-style)
+                        // NOTE: don't touch gc_block.values.p here -- P
+                        // appears AFTER "M52" in the line text, so it
+                        // hasn't been parsed yet at this point in the
+                        // single-pass parser. The actual value is read
+                        // later, once the whole line has been parsed (see
+                        // sawAdaptiveFeedWord below).
+                        sawAdaptiveFeedWord = true;
+                        mg_word_bit         = ModalGroup::MM9;
                         break;
                     case 56:
                         if (config->_enableParkingOverrideControl) {
@@ -1127,6 +1139,12 @@ Error gc_execute_line(const char* input_line) {
             masterGaugeHasQ = true;
             clear_bitnum(value_words, GCodeWord::Q);
         }
+    if (sawAdaptiveFeedWord) {  // M52 Pn -- P is required, read now that the whole line is parsed
+        if (bitnum_is_false(value_words, GCodeWord::P)) {
+            return Error::GcodeValueWordMissing;
+        }
+        clear_bitnum(value_words, GCodeWord::P);
+        gc_block.modal.adaptive_feed = (gc_block.values.p != 0) ? AdaptiveFeed::Enable : AdaptiveFeed::Disable;
     }
 
     // [11. Set active plane ]: N/A
@@ -1721,6 +1739,31 @@ Error gc_execute_line(const char* input_line) {
         spindle->tool_change(gc_state.selected_tool, false, false, true, masterGaugeHasQ, gc_block.values.q);
         report_ovr_counter = 0;  // Set to report change immediately
         gc_ovr_changed();
+    if (gc_block.modal.adaptive_feed != gc_state.modal.adaptive_feed) {  // M52 Pn
+        gc_state.modal.adaptive_feed = gc_block.modal.adaptive_feed;
+        bool enabled                 = gc_state.modal.adaptive_feed == AdaptiveFeed::Enable;
+        // P is a torque-fraction goal (e.g. 0.5 = target 50% torque) for
+        // goal-seeking (tier 3). Clamped to a max of 0.9 inside
+        // set_adaptive_feed() itself. P0/disabled only turns off tier 3 --
+        // the hard-stall and overtorque tiers stay active regardless.
+        spindle->set_adaptive_feed(enabled ? gc_block.values.p : 0.0f);
+        if (!enabled) {
+            // Give control back to the operator by resetting the override to
+            // 100%. This MUST go through the event system, NOT a direct
+            // sys.set_f_override() call: the override is also driven from the
+            // VFD task (core 0) via the same event, and a direct write here
+            // (core 1) with no planner recompute corrupts the planner
+            // velocity profile -- observed as the machine continuing to move
+            // after M52 P0. protocol_do_feed_override() does the reset +
+            // update_velocities() + gc_ovr_changed() safely in main-loop
+            // context.
+            int32_t increment = int32_t(FeedOverride::Default) - int32_t(sys.f_override());
+            if (increment != 0) {
+                protocol_send_event(&feedOverrideEvent, reinterpret_cast<void*>(intptr_t(increment)));
+            }
+        }
+        log_info("Adaptive feed control " << (enabled ? "goal-seeking enabled, target=" : "disabled")
+                                           << (enabled ? gc_block.values.p : 0.0f));
     }
 
     // [7. Spindle control ]:
