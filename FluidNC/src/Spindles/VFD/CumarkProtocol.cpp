@@ -173,11 +173,6 @@ namespace Spindles {
 
                 vfd->_sync_dev_speed = (uint32_t)std::abs((int)act2);
 
-                log_debug("Cumark block read: status=" << int(status) << " torque=" << self->_last_torque_percent
-                                                          << "% speed=" << act2 << " fault=" << (fault ? "Y" : "N")
-                                                          << " alarm=" << (alarm ? "Y" : "N") << " tqlim="
-                                                          << (torque_limited ? "Y" : "N"));
-
                 // Diagnostic: if torque reads exactly zero for a long run
                 // while the spindle is turning, drive param 50.03 is most
                 // likely not pointed at P.01.22, so 0x0005 is never being
@@ -287,6 +282,21 @@ namespace Spindles {
         }
 
         void CumarkProtocol::apply_adaptive_feed() {
+            // STATE GATE -- critical for correctness and safety.
+            // Runs in the VFD task (core 0) every poll, independent of core 1.
+            // Adaptive feed must only ACT while a program is actually cutting
+            // (State::Cycle). Firing a feed-override event in any other state
+            // -- tool-change macro, homing, jogging, idle -- pushes an
+            // override change into the planner while core 1 may be building or
+            // executing unrelated moves, corrupting planner state (seen as a
+            // StoreProhibited crash + reboot during the pick_tool move of an
+            // M6). It is also meaningless to regulate feed with no cutting
+            // move in progress. Outside State::Cycle: do nothing, and reset
+            // the timing base so dt is sane on the next real evaluation.
+            if (!state_is(State::Cycle)) {
+                _last_eval_ticks = 0;
+                return;
+            }
             Percent current = sys.f_override();
 
             // Elapsed time since the last evaluation, used to make the gains
@@ -322,10 +332,6 @@ namespace Spindles {
 
             // ---- Tier 1: hard stall trigger -- ALWAYS active. ----
             if (_last_torque_limited || _last_warning) {
-                log_debug("CumarkProtocol adaptive feed: TIER1 torque=" << _last_torque_percent << "% limited="
-                                                                         << (_last_torque_limited ? "yes" : "no") << " warning="
-                                                                         << (_last_warning ? "yes" : "no") << " -> floor "
-                                                                         << int(effective_floor) << "%");
                 set_override(effective_floor, true);
                 return;
             }
@@ -338,18 +344,13 @@ namespace Spindles {
                 }
                 Percent step = Percent(std::min(uint32_t(current > effective_floor ? current - effective_floor : 0), rate_step));
                 Percent target = Percent(current - step);
-                log_debug("CumarkProtocol adaptive feed: TIER2 torque=" << _last_torque_percent << "% (>=100%) override " << int(current)
-                                                                         << "% -> " << int(target) << "%");
                 _target_override_f = float(target);  // keep accumulator in sync (see tier 1 note)
                 set_override(target, false);
                 return;
             }
 
             // ---- Tier 3: goal-seeking -- only when M52 has set a goal. ----
-            if (_adaptive_feed_goal_percent <= 0.0f) {
-                log_debug("CumarkProtocol adaptive feed: TIER3 disabled (torque=" << _last_torque_percent << "%, ignored)");
-                return;
-            }
+            if (_adaptive_feed_goal_percent <= 0.0f) {return;}  // disabled by M52 P0}
 
             float error    = _last_torque_percent - _adaptive_feed_goal_percent;
             float deadband = float(_adaptive_feed_deadband_percent);
@@ -402,9 +403,6 @@ namespace Spindles {
             _target_override_f = target_f;
 
             Percent target = Percent(target_f + 0.5f);  // round, don't truncate
-            log_debug("CumarkProtocol adaptive feed: TIER3 torque=" << _last_torque_percent << "% goal=" << _adaptive_feed_goal_percent
-                                                                     << "% error=" << error << " target_f=" << target_f
-                                                                     << " override " << int(current) << "% -> " << int(target) << "%");
             set_override(target, false);
         }
 

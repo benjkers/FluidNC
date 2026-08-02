@@ -244,7 +244,7 @@ namespace ATCs {
 
             move_to_safe_z();
             move_over_toolsetter();
-            probe_toolsetter(approach);
+            probe_toolsetter(approach, false);
             _macro.addf("#<_atc_measured_z>=[#5063]");
             if (_probe_gauge_length_valid) {
                 _macro.addf("#<_my_tlo_z>=[#5063 + %0.4f]", tlo_constant());
@@ -291,14 +291,39 @@ namespace ATCs {
             _macro.addf("#<_atc_probe_gauge>=%0.4f", _probe_gauge_length);
         }
 
-        // M61 (set_tool) just relabels the current tool pointer, no motion --
-        // standard LinuxCNC-style semantics. Use M101 to re-gauge a tool.
+        // M61 performs NO motion and NO probing: it tells the controller which
+        // tool is *already* in the spindle. Because this ATC persists gauge
+        // lengths, we go one step beyond bare LinuxCNC: if we already KNOW this
+        // tool's gauge (from the SD table / prior probe), we also apply it as the
+        // active TLO. If the gauge is NOT known, we set the number only and cancel
+        // any stale TLO (G49) so a wrong offset can't silently persist.
+        // We NEVER probe or move here. Use M6 to measure, M101 T<n> to re-gauge.
         if (set_tool) {
             _prev_tool = new_tool;
+
             if (new_tool == 0) {
-                reset();
+                reset();                                    // T0 = no tool
+            } else if (is_rack_tool(new_tool) && _tool_gauge_valid[slot_index(new_tool)]) {
+                const int slot = slot_index(new_tool);      // rack tool, measured gauge
+                apply_tlo_from_gauge(_tool_gauge[slot]);
+                expose_current_tool_gauge(_tool_gauge[slot]);
+                log_info("ATC:" << name() << " M61 set T" << int(new_tool)
+                                << " -- applied stored gauge " << _tool_gauge[slot]);
+            } else if (new_tool == PROBE_TOOL && _probe_gauge_length_valid) {
+                apply_tlo_from_gauge(_probe_gauge_length);  // touch probe T1
+                expose_current_tool_gauge(_probe_gauge_length);
+                log_info("ATC:" << name() << " M61 set T" << int(PROBE_TOOL)
+                                << " -- applied probe gauge " << _probe_gauge_length);
+            } else {
+                _macro.addf("G49");                          // unknown gauge: cancel TLO
+                log_warn("ATC:" << name() << " M61 set T" << int(new_tool)
+                                << " -- no stored gauge; TLO cancelled (G49). "
+                                << "Use M6 T" << int(new_tool)
+                                << " to measure, or M101 T" << int(new_tool)
+                                << " Q<value> to set it.");
             }
-            save_gauge_table();
+
+            save_gauge_table();     // persist _prev_tool for power-loss recovery
             _macro.run(nullptr);
             return true;
         }
@@ -356,12 +381,14 @@ namespace ATCs {
                 move_to_safe_z();
                 move_over_toolsetter();
                 _macro.addf("G4P0.1");
-                _macro.addf("(MSG: Install T%d (known gauge length %0.4f), then resume -- it will be measured automatically)",
+                _macro.addf("$hz");
+                _macro.addf("G4P0.1");
+                _macro.addf("(MSG: Install T%d - known gauge length %0.4f - then resume, it will be measured automatically)",
                              GAUGE_SETTER_TOOL, _gauge_setter_length);
                 _macro.addf("M0");
                 move_to_safe_z();
                 move_over_toolsetter();
-                probe_toolsetter(_gauge_setter_length);  // T100's own known gauge length makes a precise approach estimate
+                probe_toolsetter(_gauge_setter_length, false);  // T100's own known gauge length makes a precise approach estimate
                 _macro.addf("#<_atc_measured_z>=[#5063]");
                 request_save_gauge(GAUGE_SETTER_TOOL);
                 move_to_safe_z();
@@ -374,10 +401,16 @@ namespace ATCs {
                 return true;
             }
 
-            if (!calibration_ready()) {
-                log_error("ATC:" << name() << " calibration incomplete ("
-                                  << (_ets_reference_probe_z_valid ? "" : "no toolsetter reference; run M6T100. ")
-                                  << (_probe_gauge_length_valid ? "" : "T1 gauge length not set; run M101 T1 Q<value>.") << ")");
+            // Every tool (including T1) carries its own absolute-gauge-length
+            // TLO, so a rack or manual tool's result depends ONLY on the
+            // toolsetter reference (from M6T100) -- NOT on T1's gauge length.
+            // T1's gauge matters only for T1 itself, which is checked in its
+            // own branch below. So the general gate here is just the
+            // toolsetter reference; requiring T1 too would needlessly block
+            // rack/manual changes.
+            if (!_ets_reference_probe_z_valid) {
+                log_error("ATC:" << name() << " no toolsetter reference yet -- run M6T"
+                                  << int(GAUGE_SETTER_TOOL) << " to establish it.");
                 send_alarm(ExecAlarm::SpindleControl);
                 return false;
             }
@@ -454,7 +487,7 @@ namespace ATCs {
                     float approach = (_tool_gauge[slot] != 0.0f) ? _tool_gauge[slot] : _manual_gauge[0];
                     move_to_safe_z();
                     move_over_toolsetter();
-                    probe_toolsetter(approach);
+                    probe_toolsetter(approach, false);
                     _macro.addf("#<_atc_measured_z>=[#5063]");
                     _macro.addf("#<_my_tlo_z>=[#5063 + %0.4f]", tlo_constant());
                     _macro.addf("G43.1Z#<_my_tlo_z>");
@@ -606,40 +639,81 @@ namespace ATCs {
         // surface). Spindle-nose Z is this plus the gauge length.
         const float tip_plane = _ets_mpos[2] + _ets_rapid_z_offset;
 
-        // Resolve the stage-2 approach gauge. For dynamic (manual) tools this
-        // is decided in gcode at runtime; otherwise it is known here in C++.
+        // Resolve the stage-2 approach gauge AND feed.
+        //
+        // Two cases, both handled the same way conceptually:
+        //  - A GOOD per-tool estimate is known -> stage 2 can rapid-approach
+        //    (fast feed) to just above the surface, because we know where the
+        //    tip is.
+        //  - NO estimate (first-time/unknown tool) -> we must assume the tool
+        //    is as LONG as possible (max gauge), so the approach stops HIGH
+        //    (safe for any real tool), and we go SLOW because we don't
+        //    actually know where the tip is.
+        //
+        // Using the MAX gauge for the unknown case is essential: a longer
+        // tool's tip reaches the setter with the nose higher up, so assuming
+        // max keeps the nose target above any real tool's trigger point.
+        // Using min here (an earlier bug) drove the nose deep and plunged a
+        // real, longer tool's tip well past the setter at rapid speed.
         if (use_dynamic_fusion_gauge) {
-            _macro.addf("o150 if [EXISTS[#<_fusion_tool_gauge>] AND [#<_fusion_tool_gauge> GT 0]]");
+            // Set the safe "unknown tool" defaults FIRST -- assume the LONGEST
+            // possible tool and approach slowly. These assignments read no
+            // runtime parameter, so they can never fault.
+            _macro.addf("#<_atc_approach_gauge>=%0.3f", _manual_gauge[1]);
+            _macro.addf("#<_atc_approach_feed>=%0.1f", _ets_slow_approach_feed);
+
+            // Then, ONLY if the post-processor actually set a tool gauge, use
+            // it for a closer/faster approach. The checks are NESTED, not
+            // combined with AND: FluidNC's expression evaluator does not
+            // short-circuit, and reading an UNDEFINED #<param> raises a gcode
+            // error (which then crashes in the error reporter). EXISTS is safe
+            // on an undefined param; the value comparison [... GT 0] is only
+            // reached once EXISTS has confirmed the param is defined.
+            _macro.addf("o150 if [EXISTS[#<_fusion_tool_gauge>]]");
+            _macro.addf("o151 if [#<_fusion_tool_gauge> GT 0]");
             _macro.addf("#<_atc_approach_gauge>=#<_fusion_tool_gauge>");
+            _macro.addf("#<_atc_approach_feed>=%0.1f", _ets_fast_approach_feed);
             _macro.addf("#<_fusion_tool_gauge>=-1");  // Invalidate it immediately so it can't be reused
-            _macro.addf("o150 else");
-            _macro.addf("#<_atc_approach_gauge>=%0.3f", _manual_gauge[0]);
+            _macro.addf("o151 endif");
             _macro.addf("o150 endif");
         } else {
-            float specific = (approach_gauge_estimate != 0.0f) ? approach_gauge_estimate : _manual_gauge[0];
-            _macro.addf("#<_atc_approach_gauge>=%0.3f", specific);
+            bool have_estimate = (approach_gauge_estimate > _manual_gauge[0]);
+            float gauge = have_estimate ? approach_gauge_estimate : _manual_gauge[1];  // MAX when unknown
+            float feed  = have_estimate ? _ets_fast_approach_feed : _ets_slow_approach_feed;
+            _macro.addf("#<_atc_approach_gauge>=%0.3f", gauge);
+            _macro.addf("#<_atc_approach_feed>=%0.1f", feed);
         }
 
         // Stage 1: always-safe rapid. Nose positioned for the LONGEST tool
         // (manual_gauge), so the tip of any real tool stops at or above the
         // clearance plane no matter how wrong the tool-specific gauge is.
-        _macro.addf("G90 G53 G0 Z%0.3f", tip_plane + _manual_gauge[1]);
+        const float rapid_plane = tip_plane + _manual_gauge[1]; 
+        _macro.addf("G90 G53 G38.3 Z%0.3f F%0.1f", rapid_plane, _ets_fast_approach_feed);
 
         // Stage 2: fast, probe-protected close approach using this tool's
         // gauge. nose = tip_plane + approach_gauge.
-        _macro.addf("G53 G38.3 Z[%0.3f + #<_atc_approach_gauge>] F4000", tip_plane);
+        _macro.addf("G53 G38.3 Z[%0.3f + #<_atc_approach_gauge>] F#<_atc_approach_feed>", tip_plane);
         _macro.addf("#<_etszrapid>=[%0.3f + #<_atc_approach_gauge>]", tip_plane);
 
-        // Stage 3: precision measurement. Target is the over-travel floor
-        // (setter top minus the permitted over-travel); the setter triggers
-        // well before this. Coarse, retract, dust-off, then fine.
-        const float probe_floor = _ets_mpos[2] - _ets_probe_overtravel;
-        _macro.addf("G53 G38.2 Z[%0.3f + #<_atc_approach_gauge>] F200", probe_floor);
+        // Stage 3: precision measurement.
+        //
+        // The G38.2 target is a hard failure FLOOR: the deepest the nose may
+        // go before we call the probe failed. Crucially this uses the MIN
+        // gauge (shortest possible tool), NOT the approach gauge -- a shorter
+        // tool needs the nose deeper to bring its tip to the surface, so min
+        // gauge gives the deepest safe target. Any real tool (gauge >= min)
+        // therefore triggers BEFORE the nose reaches this floor. Using the
+        // approach gauge here (which is MAX for an unknown tool) would make
+        // the floor too shallow to ever reach the trigger -> failed-probe
+        // alarm. The floor is independent of the stage-2 approach.
+        const float probe_floor_tip = _ets_mpos[2] - _ets_probe_overtravel;
+        _macro.addf("#<_atc_probe_floor>=[%0.3f + %0.3f]", probe_floor_tip, _manual_gauge[0]);
+        _macro.addf("G53 G38.2 Z#<_atc_probe_floor> F200");
         _macro.addf("G53 G38.5 Z0 F200");
         _macro.addf("G53 G0 Z[#5063 + 2]");  // retract before next probe
         _macro.addf("M62 P1");               // air on for dust off
         _macro.addf("G4P1");                 // wait for dust off
-        _macro.addf("G53 G38.2 Z[%0.3f + #<_atc_approach_gauge>] F50", probe_floor);
+        _macro.addf("G53 G38.2 Z#<_atc_probe_floor> F50");
         _macro.addf("M63 P1");  // air off for dust off
     }
 

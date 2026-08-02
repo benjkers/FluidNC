@@ -105,6 +105,14 @@ namespace ATCs {
         // value = millimetres of permitted over-travel past the surface.
         float              _ets_probe_overtravel = 10.0;
 
+        // Stage-2 approach feed used when the tool's gauge length is NOT
+        // known (first-time/unknown tool). In that case the approach assumes
+        // the longest possible tool (max of manual_gauge_range) and comes in
+        // at this slower, stop-on-contact-safe feed rather than rapid. When a
+        // good per-tool estimate IS known, stage 2 uses a fast feed instead.
+        float              _ets_slow_approach_feed = 400.0;
+        float              _ets_fast_approach_feed = 2000.0;
+
         // T100's known, fixed, physical gauge length (spindle-end to tip).
         // This is a config constant -- it is NEVER measured or persisted.
         // T100 reference-tool gauge length (the "gauge line" length),
@@ -166,10 +174,13 @@ namespace ATCs {
         bool is_rack_tool(tool_t t) const { return t >= _first_tool_number && t < _first_tool_number + _tool_count; }
         int  slot_index(tool_t t) const { return int(t) - int(_first_tool_number); }
 
-        // True once both halves of the calibration chain are known: the
-        // toolsetter reference (from M6T100) and the probe's own gauge
-        // length (manually entered via M101 T1 Q<value>). Needed before
-        // any rack/manual tool's TLO can be computed.
+        // True once BOTH the toolsetter reference (M6T100) and the probe's
+        // own gauge length (M101 T1 Q<value>) are known. NOTE: rack and
+        // manual tool changes do NOT require this -- their TLO depends only
+        // on the toolsetter reference, since every tool carries its own
+        // absolute-gauge TLO. This is retained only as a convenience for
+        // callers that specifically need the probe to also be ready (e.g.
+        // a workflow that will immediately probe a workpiece with T1).
         bool calibration_ready() const { return _ets_reference_probe_z_valid && _probe_gauge_length_valid; }
 
         // Converts a raw toolsetter-trigger Z reading into an absolute
@@ -239,6 +250,8 @@ namespace ATCs {
             handler.item("manual_gauge_range_mm", _manual_gauge);
             handler.item("ets_rapid_z_offset_mm", _ets_rapid_z_offset);
             handler.item("ets_probe_overtravel_mm", _ets_probe_overtravel, 0.5f, 100.0f);
+            handler.item("ets_slow_approach_feed_mm_min", _ets_slow_approach_feed, 50.0f, 2000.0f);
+            handler.item("ets_fast_approach_feed_mm_min", _ets_fast_approach_feed, 1500.0f, 4000.0f);
             handler.item("gauge_line_length_mm", _gauge_setter_length);
             handler.item("first_tool_number", _first_tool_number, 2, 250);
             handler.item("tool_count", _tool_count, 0, uint32_t(MAX_TOOL_SLOTS));

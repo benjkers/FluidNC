@@ -131,7 +131,7 @@ control:
 
 macros:
   startup_line0: g21 
-  startup_line1: $message/level=error
+  startup_line1: $message/level=info
   macro0: 
   macro1: 
   macro2:
@@ -153,7 +153,7 @@ probe:
   
 
 coolant:
-  flood_pin:I2SO.18
+  flood_pin: I2SO.18
   mist_pin: I2SO.16
   delay_ms: 0
 start:
@@ -163,6 +163,8 @@ atc_custom:
   ets_mpos_mm: -22.000 -22.000 -293.000
   ets_rapid_z_offset_mm: 10.000
   ets_probe_overtravel_mm: 4.000
+  ets_slow_approach_feed_mm_min: 200.000
+  ets_fast_approach_feed_mm_min: 4000.000
   gauge_line_length_mm: 63.666
   manual_gauge_range_mm: 25.000 200.000
   tool_holder_pulloff_mm: 0.0 35.0 15.0 0.0 0.0 0.0
@@ -170,7 +172,7 @@ atc_custom:
   tool_count: 6              
   gauge_filename: "Tool_Gauges_Lengths.txt" 
   slot1_mpos_mm: -1.100 -483.300 -176
-  slot2_mpos_mm: 100.200 -483.300 -174.5
+  slot2_mpos_mm: -100.200 -483.300 -174.5
   slot3_mpos_mm: -198.100 -484.300 -173.1
   slot4_mpos_mm: -283.800 -484.700 -172.8
   slot5_mpos_mm: -380.000 -484.700 -172.9
@@ -187,7 +189,7 @@ uart1:
 
 Cumark:
   atc: atc_custom
-  poll_ms: 100
+  poll_ms: 250
   uart_num: 1
   modbus_id: 1
   tool_num: 0
@@ -197,8 +199,8 @@ Cumark:
   off_on_alarm: true
   adaptive_feed_floor_percent: 10
   adaptive_feed_min_percent: 25
-  adaptive_feed_max_percent: 150
+  adaptive_feed_max_percent: 100
   adaptive_feed_gain_down: 2.0
   adaptive_feed_gain_up: 0.5
   adaptive_feed_deadband_percent: 2
-  adaptive_feed_aggressive_step: 150
+  adaptive_feed_aggressive_step: 100
