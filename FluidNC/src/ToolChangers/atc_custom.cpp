@@ -287,6 +287,9 @@ namespace ATCs {
         _macro.addf("#<_etsx>=%0.3f", _ets_mpos[0]);
         _macro.addf("#<_etsy>=%0.3f", _ets_mpos[1]);
         _macro.addf("#<_etsz>=%0.3f", _ets_mpos[2]);
+        _macro.addf("#<_etszrapidoffset>=%0.3f", _ets_rapid_z_offset);
+        _macro.addf("#<_etsovertravel>=%0.3f", _ets_probe_overtravel);
+        
         if (_probe_gauge_length_valid) {
             _macro.addf("#<_atc_probe_gauge>=%0.4f", _probe_gauge_length);
         }
@@ -655,46 +658,50 @@ namespace ATCs {
         // max keeps the nose target above any real tool's trigger point.
         // Using min here (an earlier bug) drove the nose deep and plunged a
         // real, longer tool's tip well past the setter at rapid speed.
+        // Stage 1: always-safe rapid to the LONGEST-tool clearance plane. Any
+        // real tool's tip stops at or above here regardless of its true gauge.
+        const float rapid_plane = tip_plane + _manual_gauge[1];
+        _macro.addf("G90 G53 G38.3 Z%0.3f F%0.1f", rapid_plane, _ets_fast_approach_feed);
+
+        // Stage 2: OPTIONAL fast close approach, emitted ONLY when it would
+        // actually descend below stage 1. If the approach gauge equals the
+        // maximum (i.e. we have no better estimate), stage 2's target is the
+        // SAME Z as stage 1 -> a zero-distance G38.3 -> GCode error. So stage 2
+        // is skipped in that case and we go straight to the slow stage-3 probe.
+        //
+        // The approach gauge/feed and the skip decision differ by path:
         if (use_dynamic_fusion_gauge) {
-            // Set the safe "unknown tool" defaults FIRST -- assume the LONGEST
-            // possible tool and approach slowly. These assignments read no
-            // runtime parameter, so they can never fault.
+            // Manual/non-rack tool: the gauge is only known at RUNTIME from
+            // #<_fusion_tool_gauge>. Default to the safe unknown values, then
+            // override if the post set a real gauge. Because the value is
+            // runtime, the stage-2 skip must also be a runtime (o-code) guard:
+            // emit stage 2 only if the resolved approach gauge is LESS THAN
+            // the max (i.e. a real, shorter tool that can descend further).
             _macro.addf("#<_atc_approach_gauge>=%0.3f", _manual_gauge[1]);
             _macro.addf("#<_atc_approach_feed>=%0.1f", _ets_slow_approach_feed);
-
-            // Then, ONLY if the post-processor actually set a tool gauge, use
-            // it for a closer/faster approach. The checks are NESTED, not
-            // combined with AND: FluidNC's expression evaluator does not
-            // short-circuit, and reading an UNDEFINED #<param> raises a gcode
-            // error (which then crashes in the error reporter). EXISTS is safe
-            // on an undefined param; the value comparison [... GT 0] is only
-            // reached once EXISTS has confirmed the param is defined.
             _macro.addf("o150 if [EXISTS[#<_fusion_tool_gauge>]]");
             _macro.addf("o151 if [#<_fusion_tool_gauge> GT 0]");
             _macro.addf("#<_atc_approach_gauge>=#<_fusion_tool_gauge>");
             _macro.addf("#<_atc_approach_feed>=%0.1f", _ets_fast_approach_feed);
-            _macro.addf("#<_fusion_tool_gauge>=-1");  // Invalidate it immediately so it can't be reused
+            _macro.addf("#<_fusion_tool_gauge>=-1");  // invalidate so it can't be reused
             _macro.addf("o151 endif");
             _macro.addf("o150 endif");
+            // Runtime skip: only descend if the approach is shorter than max.
+            _macro.addf("o152 if [#<_atc_approach_gauge> LT %0.3f]", _manual_gauge[1]);
+            _macro.addf("G53 G38.3 Z[%0.3f + #<_atc_approach_gauge>] F#<_atc_approach_feed>", tip_plane);
+            _macro.addf("o152 endif");
         } else {
+            // Rack tool: the gauge estimate is known HERE in C++, so the skip
+            // is a plain C++ decision -- no o-code needed. A real estimate
+            // (> the minimum) descends closer and fast; otherwise there is no
+            // estimate and stage 2 would collide with stage 1, so we omit it
+            // entirely and let the slow stage-3 probe do the work.
             bool have_estimate = (approach_gauge_estimate > _manual_gauge[0]);
-            float gauge = have_estimate ? approach_gauge_estimate : _manual_gauge[1];  // MAX when unknown
-            float feed  = have_estimate ? _ets_fast_approach_feed : _ets_slow_approach_feed;
-            _macro.addf("#<_atc_approach_gauge>=%0.3f", gauge);
-            _macro.addf("#<_atc_approach_feed>=%0.1f", feed);
+            if (have_estimate) {
+                _macro.addf("G53 G38.3 Z[%0.3f + %0.3f] F%0.1f", tip_plane, approach_gauge_estimate, _ets_fast_approach_feed);
+            }
+            // else: no stage 2 -- stage 1 already positioned us; go to stage 3.
         }
-
-        // Stage 1: always-safe rapid. Nose positioned for the LONGEST tool
-        // (manual_gauge), so the tip of any real tool stops at or above the
-        // clearance plane no matter how wrong the tool-specific gauge is.
-        const float rapid_plane = tip_plane + _manual_gauge[1]; 
-        _macro.addf("G90 G53 G38.3 Z%0.3f F%0.1f", rapid_plane, _ets_fast_approach_feed);
-
-        // Stage 2: fast, probe-protected close approach using this tool's
-        // gauge. nose = tip_plane + approach_gauge.
-        _macro.addf("G53 G38.3 Z[%0.3f + #<_atc_approach_gauge>] F#<_atc_approach_feed>", tip_plane);
-        _macro.addf("#<_etszrapid>=[%0.3f + #<_atc_approach_gauge>]", tip_plane);
-
         // Stage 3: precision measurement.
         //
         // The G38.2 target is a hard failure FLOOR: the deepest the nose may
