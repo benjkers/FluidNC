@@ -199,7 +199,7 @@ Cumark:
   off_on_alarm: true
   adaptive_feed_floor_percent: 10
   adaptive_feed_min_percent: 25
-  adaptive_feed_max_percent: 100
+  adaptive_feed_max_percent: 125
   adaptive_feed_gain_down: 2.0
   adaptive_feed_gain_up: 0.5
   adaptive_feed_deadband_percent: 2
