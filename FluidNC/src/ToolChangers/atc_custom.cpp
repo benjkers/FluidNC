@@ -346,9 +346,43 @@ namespace ATCs {
             return true;
         }
 
-        // Repeat request for the same tool that's already loaded is a no-op,
-        // EXCEPT T100 which should always re-run its measurement.
-        if (_prev_tool == new_tool && new_tool != GAUGE_SETTER_TOOL) {
+        // Repeat request for the same tool that's already loaded: no physical
+        // change, but the TLO may need restoring. A soft-reset (STOP button)
+        // runs gc_init(), which zeroes the active TLO (#5401-#5403). On resume
+        // the program re-issues T<n> M6 for the tool still in the spindle, so
+        // without restoring the offset we would cut with TLO = 0.
+        // Gcode NAMED parameters are NOT cleared by a reset, so
+        // #<_current_tool_gauge> still holds the right value -- just re-apply
+        // it. The else branch covers a power cycle, where the param is gone.
+        if (_prev_tool == new_tool && new_tool != GAUGE_SETTER_TOOL && new_tool != PROBE_TOOL) {
+            _macro.erase();
+            _macro.addf("o160 if [EXISTS[#<_current_tool_gauge>]]");
+            _macro.addf("G43.1Z#<_current_tool_gauge>");
+            _macro.addf("o160 else");
+            if (is_rack_tool(new_tool) && _tool_gauge_valid[slot_index(new_tool)]) { // rack tool, with known gauge: restore TLO and expose the gauge for other macros
+                const int slot = slot_index(new_tool);
+                _macro.addf("#<_current_tool_gauge>=%0.4f", _tool_gauge[slot]);
+                _macro.addf("#<_current_tool_probe_z>=%0.4f", probe_z_from_absolute_gauge(_tool_gauge[slot]));
+                _macro.addf("G43.1Z%0.4f", _tool_gauge[slot]);
+            } else { // unknown gauge & manual tool: re-measure on the toolsetter
+                log_info("ATC:" << name() << " T" << int(new_tool)
+                                << " already loaded but gauge unknown -- re-measuring on toolsetter");
+                if (!_ets_reference_probe_z_valid) {
+                    log_error("ATC:" << name() << " no toolsetter reference yet -- run M6T"
+                                      << int(GAUGE_SETTER_TOOL) << " first; TLO not restored.");
+                } else {
+                    move_to_safe_z();
+                    move_over_toolsetter();
+                    probe_toolsetter(0.0f, true);
+                    _macro.addf("#<_my_tlo_z>=[#5063 + %0.4f]", tlo_constant());
+                    _macro.addf("G43.1Z#<_my_tlo_z>");
+                    _macro.addf("#<_current_tool_gauge>=[#5063 + %0.4f]", _gauge_setter_length - _ets_reference_probe_z);
+                    _macro.addf("#<_current_tool_probe_z>=[#5063]");
+                    move_to_safe_z();
+                }
+            }
+            _macro.addf("o160 endif");
+            _macro.run(nullptr);
             return true;
         }
 
@@ -588,9 +622,11 @@ namespace ATCs {
         float feed_height = _tool_mpos[slot][2] + _tool_holder[2];  // move z to above tool holder height
         _macro.addf("G53G0X%0.3fY%0.3f", _tool_mpos[slot][0], feed_point);  // move to tool location xy with feed distance offset
         _macro.addf("G53G0Z%0.3f", _tool_mpos[slot][2]);                    // move to tool location z
+        _macro.addf("M5");                                                      // turn off spindle
+        _macro.addf("G4 P5");                                                    // wait for spindle to stop
         _macro.addf("G53G0Y%0.3f", _tool_mpos[slot][1]);                    // move tool into rack
         _macro.addf("M62 P0");                                              // air on
-        _macro.addf("G4 P0.5");                                             // wait for air to unlock
+        _macro.addf("G4 P1");                                             // wait for air to unlock
         _macro.addf("G53G0Z%0.3f", feed_height);                            // lift off tool holder
         _macro.addf("M63 P0");                                              // air off
         move_to_safe_z();
@@ -603,11 +639,13 @@ namespace ATCs {
         float feed_height = _tool_mpos[slot][2] + _tool_holder[2];  // move z to above tool holder height
         float feed_point  = _tool_mpos[slot][1] + _tool_holder[1];  // move z to above tool holder height
         _macro.addf("G53G0X%0.3fY%0.3f", _tool_mpos[slot][0], _tool_mpos[slot][1]);  // move to tool location
-        _macro.addf("M8");                                                           // Flood coolant to wash chips off taper
+        _macro.addf("M8"); 
+        _macro.addf("G4 P5");                                                          // Flood coolant to wash chips off taper
         _macro.addf("G53G0Z%0.3f", feed_height);
-        _macro.addf("M62 P0");                                  // air on
+        _macro.addf("M9");
+        _macro.addf("M62 P0"); 
+        _macro.addf("G4 P1");                                // air on
         _macro.addf("G53G1Z%0.3fF1000", _tool_mpos[slot][2]);   // drop down onto tool
-        _macro.addf("M9");                                      // flood coolant off
         _macro.addf("M63 P0");                                  // air off
         _macro.addf("G4 P1");                                   // wait for air to lock
         _macro.addf("G53G0Y%0.3f", feed_point);                 // move tool into rack

@@ -40,7 +40,7 @@ properties = {
     description: "Torque-based adaptive feed control (M52) target for this operation, as a percentage of rated torque. The feed override is scaled continuously to hold this target -- not stepped -- so it converges smoothly rather than hunting. 0 disables goal-seeking for this operation; the machine's hard-stall and overtorque protections stay active regardless, independent of this setting. The firmware clamps to 90% max. Defaults to a deliberately low, fail-safe value: if you forget to raise it, the machine runs conservatively slow rather than risk overload/breaking a tool.",
     group      : "operationProps",
     type       : "integer",
-    value      : 5,
+    value      : 0,
     range      : [0, 90],
     scope      : "operation",
     enabled    : ["milling", "drilling"]
