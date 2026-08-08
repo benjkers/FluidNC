@@ -171,13 +171,13 @@ atc_custom:
   first_tool_number: 2
   tool_count: 6              
   gauge_filename: "Tool_Gauges_Lengths.txt" 
-  slot1_mpos_mm: -1.100 -483.300 -176
-  slot2_mpos_mm: -100.200 -483.300 -174.5
-  slot3_mpos_mm: -198.100 -484.300 -173.1
-  slot4_mpos_mm: -283.800 -484.700 -172.8
-  slot5_mpos_mm: -380.000 -484.700 -172.9
-  slot6_mpos_mm: -477.200 -484.700 -172.3
-  spindle_stop_time: 5.0
+  slot1_mpos_mm: -1.100 -487 -176
+  slot2_mpos_mm: -100.200 -489 -174.5
+  slot3_mpos_mm: -198.100 -489 -173.1
+  slot4_mpos_mm: -283.800 -489 -172.8
+  slot5_mpos_mm: -380.000 -489 -172.9
+  slot6_mpos_mm: -477.200 -489 -172.3
+  spindle_stop_time: 2.5
   coolant_on_time: 2.5
 
 
@@ -196,7 +196,7 @@ Cumark:
   modbus_id: 1
   tool_num: 0
   spinup_ms: 3000
-  spindown_ms: 5000
+  spindown_ms: 6000
   speed_map: 0=0.000% 0=3.000% 540=3.000% 18000=100.000%
   off_on_alarm: true
   adaptive_feed_floor_percent: 10
