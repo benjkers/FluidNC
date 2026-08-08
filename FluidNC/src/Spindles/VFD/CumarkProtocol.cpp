@@ -410,18 +410,24 @@ namespace Spindles {
             switch (index) {
                 case -1:
                     data.tx_length = 6;
-                    data.rx_length = 5;
+                    data.rx_length = 5;  // addr + func + byte_count + 1 register (2 bytes); the
+                                        // framework adds 2 more for the CRC itself
 
                     data.msg[1] = 0x03;  // READ
-                    data.msg[2] = 0x14;  // Register address, high byte (speed in RPM)
-                    data.msg[3] = 0x00;  // Register address, low byte (speed in RPM)
+                    data.msg[2] = 0x14;  // P20.00 Maximum speed: high byte = group 20 (0x14)
+                    data.msg[3] = 0x00;  //                       low byte  = index 0
                     data.msg[4] = 0x00;  // Number of elements, high byte
-                    data.msg[5] = 0x01;  // Number of elements, low byte 
+                    data.msg[5] = 0x01;  // Number of elements, low byte
 
                     return [](const uint8_t* response, VFDSpindle* vfd, VFDProtocol* detail) -> bool {
-                        uint16_t value = (response[4] << 8) | response[5];
-                        auto cumark           = static_cast<CumarkProtocol*>(detail);
-                        log_debug("Max Speed is: " << (value))
+                        // Modbus 03H reply: [0]addr [1]func [2]byte_count [3]data_hi [4]data_lo
+                        // (CRC follows at [5]/[6]). The first register therefore starts at
+                        // index 3 -- same as fieldbus_block_read. Reading from [4]/[5]
+                        // returns the low data byte OR'd with the CRC, which is why the
+                        // reported value never matched the drive.
+                        uint16_t value  = (response[3] << 8) | response[4];
+                        auto     cumark = static_cast<CumarkProtocol*>(detail);
+                        log_debug("Max Speed is: " << value);
                         //cumark->_maxSpeed = value;
                         cumark->updateRPM(vfd);
                         return true;
@@ -429,7 +435,7 @@ namespace Spindles {
                     break;
                 default:
                     break;
-            } 
+            }
             return nullptr;
         }
 
@@ -440,13 +446,12 @@ namespace Spindles {
                 _minSpeed = _maxSpeed;
             }
             if (vfd->_speeds.size() == 0) {
-                // Convert from Frequency in centiHz (the divisor of 100) to RPM (the factor of 60)
                 SpindleSpeed minRPM = _minSpeed;
                 SpindleSpeed maxRPM = _maxSpeed;
                 vfd->shelfSpeeds(minRPM, maxRPM);
             }
             vfd->setupSpeeds(_maxSpeed);
-            vfd->_slop = std::max(_maxSpeed/40, 1);
+            vfd->_slop = 200;
         }
 
 

@@ -355,7 +355,6 @@ namespace ATCs {
         // #<_current_tool_gauge> still holds the right value -- just re-apply
         // it. The else branch covers a power cycle, where the param is gone.
         if (_prev_tool == new_tool && new_tool != GAUGE_SETTER_TOOL) {
-            _macro.erase();
             _macro.addf("o160 if [EXISTS[#<_current_tool_gauge>]]");
             _macro.addf("G43.1Z#<_current_tool_gauge>");
             _macro.addf("o160 else");

@@ -12,7 +12,7 @@ namespace Spindles {
             uint32_t last_speed;  // Store the last speed set
             int16_t speed;
             int16_t _maxSpeed=18000;
-            int16_t _minSpeed=500;
+            int16_t _minSpeed=0;
 
             // ---------------------------------------------------------------
             // Adaptive feed control (M52 Pn, LinuxCNC-style) -- three tiers.
