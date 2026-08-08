@@ -354,16 +354,18 @@ namespace ATCs {
         // Gcode NAMED parameters are NOT cleared by a reset, so
         // #<_current_tool_gauge> still holds the right value -- just re-apply
         // it. The else branch covers a power cycle, where the param is gone.
-        if (_prev_tool == new_tool && new_tool != GAUGE_SETTER_TOOL && new_tool != PROBE_TOOL) {
+        if (_prev_tool == new_tool && new_tool != GAUGE_SETTER_TOOL) {
             _macro.erase();
             _macro.addf("o160 if [EXISTS[#<_current_tool_gauge>]]");
             _macro.addf("G43.1Z#<_current_tool_gauge>");
             _macro.addf("o160 else");
             if (is_rack_tool(new_tool) && _tool_gauge_valid[slot_index(new_tool)]) { // rack tool, with known gauge: restore TLO and expose the gauge for other macros
                 const int slot = slot_index(new_tool);
-                _macro.addf("#<_current_tool_gauge>=%0.4f", _tool_gauge[slot]);
-                _macro.addf("#<_current_tool_probe_z>=%0.4f", probe_z_from_absolute_gauge(_tool_gauge[slot]));
-                _macro.addf("G43.1Z%0.4f", _tool_gauge[slot]);
+                apply_tlo_from_gauge(_tool_gauge[slot]); 
+                expose_current_tool_gauge(_tool_gauge[slot]);
+            } else if (new_tool == PROBE_TOOL && _probe_gauge_length_valid) {
+                apply_tlo_from_gauge(_probe_gauge_length);  // touch probe T1`
+                expose_current_tool_gauge(_probe_gauge_length);
             } else { // unknown gauge & manual tool: re-measure on the toolsetter
                 log_info("ATC:" << name() << " T" << int(new_tool)
                                 << " already loaded but gauge unknown -- re-measuring on toolsetter");
