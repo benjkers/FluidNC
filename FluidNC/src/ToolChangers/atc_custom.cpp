@@ -624,7 +624,7 @@ namespace ATCs {
         _macro.addf("G53G0X%0.3fY%0.3f", _tool_mpos[slot][0], feed_point);  // move to tool location xy with feed distance offset
         _macro.addf("G53G0Z%0.3f", _tool_mpos[slot][2]);                    // move to tool location z
         _macro.addf("M5");                                                      // turn off spindle
-        _macro.addf("G4 P5");                                                    // wait for spindle to stop
+        _macro.addf("G4 P%0.3f", _spindle_stop_time);                                                    // wait for spindle to stop
         _macro.addf("G53G0Y%0.3f", _tool_mpos[slot][1]);                    // move tool into rack
         _macro.addf("M62 P0");                                              // air on
         _macro.addf("G4 P1");                                             // wait for air to unlock
@@ -641,7 +641,7 @@ namespace ATCs {
         float feed_point  = _tool_mpos[slot][1] + _tool_holder[1];  // move z to above tool holder height
         _macro.addf("G53G0X%0.3fY%0.3f", _tool_mpos[slot][0], _tool_mpos[slot][1]);  // move to tool location
         _macro.addf("M8"); 
-        _macro.addf("G4 P5");                                                          // Flood coolant to wash chips off taper
+        _macro.addf("G4 P%0.3f", _coolant_on_time);                                                          // Flood coolant to wash chips off taper
         _macro.addf("G53G0Z%0.3f", feed_height);
         _macro.addf("M9");
         _macro.addf("M62 P0"); 

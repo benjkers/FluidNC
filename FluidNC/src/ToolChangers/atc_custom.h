@@ -138,6 +138,11 @@ namespace ATCs {
         // if you need more than 12 pockets in a single rack.
         std::vector<float> _tool_mpos[MAX_TOOL_SLOTS];
 
+        // delay after spindle stop before moving to next tool (seconds)
+        float _spindle_stop_time = 5.0;
+        // delay after coolant on before moving to next tool (seconds)
+        float _coolant_on_time = 5.0;
+
         // ------------------------ runtime / persisted state ------------------------
         // Absolute gauge lengths (spindle-end to tip), NOT raw probe
         // readings -- computed via absolute_gauge_from_probe() at the time
@@ -272,6 +277,8 @@ namespace ATCs {
             handler.item("slot11_mpos_mm", _tool_mpos[10]);
             handler.item("slot12_mpos_mm", _tool_mpos[11]);
             handler.item("tool_holder_pulloff_mm", _tool_holder);
+            handler.item("spindle_stop_time", _spindle_stop_time, 0.0f, 10.0f);
+            handler.item("coolant_on_time", _coolant_on_time, 0.0f, 10.0f);
         }
     };
 }
