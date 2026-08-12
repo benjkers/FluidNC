@@ -130,15 +130,15 @@ control:
   macro3_pin: NO_PIN
 
 macros:
-  startup_line0: g21 
-  startup_line1: $message/level=info
+  startup_line0: $SD/Run=StartUp.nc 
+  startup_line1: 
   macro0: 
   macro1: 
   macro2:
   macro3:
-  after_homing: M52P0
-  after_reset: M52P0
-  after_unlock: M52P0
+  after_homing:
+  after_reset: $SD/Run=StartUp.nc
+  after_unlock: 
 
 user_outputs:
   digital0_pin: gpio.12
@@ -160,7 +160,7 @@ start:
   must_home: true
 
 atc_custom:
-  ets_mpos_mm: -22.000 -22.000 -293.000
+  ets_mpos_mm: -22.400 -22.000 -296.533
   ets_rapid_z_offset_mm: 10.000
   ets_probe_overtravel_mm: 4.000
   ets_slow_approach_feed_mm_min: 200.000
@@ -205,4 +205,4 @@ Cumark:
   adaptive_feed_gain_down: 2.0
   adaptive_feed_gain_up: 0.5
   adaptive_feed_deadband_percent: 2
-  adaptive_feed_aggressive_step: 100
+  adaptive_feed_aggressive_step: 50
