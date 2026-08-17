@@ -1,6 +1,6 @@
-(ProbeOuterXY.nc)
-(Centre of an external feature - circular or rectangular boss)
-(Fusion cycles: "probing-xy-circular-boss" and "probing-xy-rectangular-boss")
+(ProbeYWall.nc)
+(Centre of a wall pair - the two outside walls either side of a part, across Y)
+(Fusion cycles: "probing-y-wall")
 ()
 (EXTERNAL feature: the probe starts at the nominal centre ABOVE the part,)
 (lifts clear, moves out past each face, drops down beside it and probes)
@@ -17,55 +17,11 @@ $SD/Run=/Probing/ProbeInit.nc
 #<_start_abs_y>=#<_abs_y>
 #<_start_abs_z>=#<_abs_z>
 
-o360 if [#<_probe_safe_z> LE 0]
+o720 if [#<_probe_safe_z> LE 0]
     (MSG: PROBE ERROR - external probing needs a positive clearance lift)
     $Alarm/Send=3
     G4 P0.1
-o360 endif
-
-#<_halfx>=[#<_probe_width_x> / 2]
-
-(--- -X face, probing back +X ---)
-G91
-G0 Z[#<_probe_safe_z>]
-G90
-G53 G38.3 X[#<_start_abs_x> + [-1 * [#<_halfx> + #<_probe_clearance>]]] F#<_probe_feed_link>
-G91
-G38.3 Z[0 - #<_probe_safe_z>] F#<_probe_feed_link>
-G90
-#<_ps_ux>=1
-#<_ps_uy>=0
-#<_ps_uz>=0
-#<_ps_rotate>=1
-$SD/Run=/Probing/_ProbeSurface.nc
-#<_wxa>=#<_ps_x>
-
-(--- +X face, probing back -X ---)
-G91
-G0 Z[#<_probe_safe_z>]
-G90
-G53 G38.3 X[#<_start_abs_x> + [1 * [#<_halfx> + #<_probe_clearance>]]] F#<_probe_feed_link>
-G91
-G38.3 Z[0 - #<_probe_safe_z>] F#<_probe_feed_link>
-G90
-#<_ps_ux>=-1
-#<_ps_uy>=0
-#<_ps_uz>=0
-#<_ps_rotate>=1
-$SD/Run=/Probing/_ProbeSurface.nc
-#<_wxb>=#<_ps_x>
-
-#<_cx>=[[#<_wxa> + #<_wxb>] / 2]
-#<_probe_meas_x>=[ABS[#<_wxb> - #<_wxa>] - [2 * #<_probe_eff_radius>]]
-
-(--- back over the found centre before the next axis ---)
-G91
-G0 Z[#<_probe_safe_z>]
-G90
-G53 G38.3 X#<_cx> F#<_probe_feed_link>
-G91
-G38.3 Z[0 - #<_probe_safe_z>] F#<_probe_feed_link>
-G90
+o720 endif
 
 #<_halfy>=[#<_probe_width_y> / 2]
 
@@ -102,9 +58,8 @@ $SD/Run=/Probing/_ProbeSurface.nc
 #<_cy>=[[#<_wya> + #<_wyb>] / 2]
 #<_probe_meas_y>=[ABS[#<_wyb> - #<_wya>] - [2 * #<_probe_eff_radius>]]
 
-#<_probe_meas_dia>=[[#<_probe_meas_x> + #<_probe_meas_y>] / 2]
-#<_probe_dev_size>=[[[#<_probe_meas_x> - #<_probe_width_x>] + [#<_probe_meas_y> - #<_probe_width_y>]] / 2]
-#<_probe_dev_pos>=[SQRT[[[#<_cx> - #<_start_abs_x>] * [#<_cx> - #<_start_abs_x>]] + [[#<_cy> - #<_start_abs_y>] * [#<_cy> - #<_start_abs_y>]]]]
+#<_probe_dev_size>=[#<_probe_meas_y> - #<_probe_width_y>]
+#<_probe_dev_pos>=[ABS[#<_cy> - #<_start_abs_y>]]
 
 G91
 G0 Z[#<_probe_safe_z>]
@@ -119,7 +74,7 @@ G90
 (Parking the controlled point ON the surface would bury the ball by a full)
 (tip radius and snap the stylus, and any over-travel past the deflection)
 (limit of the probe would do the same.)
-G10 L20 P#<_probe_wcs> X[#<_probe_nom_x> + [#<_abs_x> - #<_cx>]] Y[#<_probe_nom_y> + [#<_abs_y> - #<_cy>]]
-(MSG: Boss centred, WCS X0 Y0 set)
+G10 L20 P#<_probe_wcs> Y[#<_probe_nom_y> + [#<_abs_y> - #<_cy>]]
+(MSG: Y wall pair centred, WCS Y0 set)
 
 $SD/Run=/Probing/ProbeCheckTolerance.nc

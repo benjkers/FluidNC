@@ -72,7 +72,7 @@ o302 endif
 o304 if [#<_probe_eff_radius> LE 0]
     (MSG: PROBE ERROR - probe yaw is >= the stylus radius, check calibration)
     $Alarm/Send=3
-    M30
+    G4 P0.1
 o304 endif
 o315 if [EXISTS[#<_probe_safe_z>]]
 o315 else
@@ -86,6 +86,62 @@ o317 if [EXISTS[#<_probe_width_y>]]
 o317 else
 #<_probe_width_y>=0.000
 o317 endif
+
+(================= TARGET OFFSET AND NOMINAL POSITION =================)
+(WHICH work offset the result is written to. 0 = whichever offset is)
+(currently active, 1 = G54, 2 = G55, and so on. Fusion's WCS probing lets)
+(you drive the probe from one offset while writing the result into a)
+(different one, so this must not be assumed to be the active offset.)
+o324 if [EXISTS[#<_probe_wcs>]]
+o324 else
+#<_probe_wcs>=0
+o324 endif
+
+(The NOMINAL position of the probed feature, in the TARGET offset. The)
+(feature being probed is very often NOT at the origin -- a bore might sit)
+(at X50 Y30 in the setup. The origin is therefore placed so that the found)
+(feature lands on these coordinates, rather than forcing the origin onto)
+(the feature itself. Leave them 0 and the feature becomes the origin,)
+(which is the old behaviour.)
+o325 if [EXISTS[#<_probe_nom_x>]]
+o325 else
+#<_probe_nom_x>=0.000
+o325 endif
+o326 if [EXISTS[#<_probe_nom_y>]]
+o326 else
+#<_probe_nom_y>=0.000
+o326 endif
+o327 if [EXISTS[#<_probe_nom_z>]]
+o327 else
+#<_probe_nom_z>=0.000
+o327 endif
+
+(================= RUNOUT COMPENSATION =================)
+(Retract distance used while the operator rotates the spindle 180 degrees)
+(between the two touches of a surface. Must clear the surface but stay)
+(close enough that the second touch is quick. Defaults to the clearance.)
+o328 if [EXISTS[#<_probe_runout>]]
+o328 else
+#<_probe_runout>=0
+o328 endif
+
+(Direction of travel for a single axis edge probe: +1 toward positive,)
+(-1 toward negative. The post always writes this, but a default belongs)
+(here too so running an edge macro by hand from the console cannot fault)
+(on an undefined parameter.)
+o329 if [EXISTS[#<_probe_axis_dir>]]
+o329 else
+#<_probe_axis_dir>=1
+o329 endif
+
+(Feed for PROTECTED positioning moves. Every move made with the probe in)
+(the spindle is a G38.3 rather than a G0 -- it stops on contact instead of)
+(snapping the stylus on a clamp or a part that is not where CAM thinks.)
+(This is how fast those moves travel. The post passes Fusion's link feed.)
+o332 if [EXISTS[#<_probe_feed_link>]]
+o332 else
+#<_probe_feed_link>=1000.000
+o332 endif
 
 (================= TOLERANCE DEFAULTS =================)
 (0 = no check. Actions: 0 = warn only, 1 = alarm and stop.)

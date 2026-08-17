@@ -1,37 +1,44 @@
 (ProbeZSurface.nc)
-(Probes downward onto a surface and sets Z0 in the active work offset)
-(there. Fusion cycle "probing-z".)
+(Probes downward onto a surface and sets Z0 in the TARGET work offset.)
+(Fusion cycle "probing-z".)
 ()
-(No radius compensation: the touch is on the BOTTOM of the stylus ball,)
-(so the tip is already the reference the tool length offset was set from.)
-(Probe yaw is an X/Y correction and deliberately does not apply here.)
+(NO radius compensation: the touch is on the BOTTOM of the ball, which is)
+(already the reference the tool length offset was set from.)
 ()
-(  #<_probe_clearance>    standoff at which the fast probe begins)
-(  #<_probe_overtravel>   how far past nominal before it is a miss)
-(  #<_probe_feed_fast>    first touch feed)
-(  #<_probe_feed_slow>    second, accurate touch feed)
+(NO runout compensation either, and this is deliberate. Runout is a RADIAL)
+(offset of the tip from the spindle axis. Rotating the spindle sweeps the)
+(ball around a cone but does not move the ball centre in Z, so the lowest)
+(point of the ball - and therefore the Z reading - is unchanged. A 180)
+(degree rotation here would cost the operator a pause and measure nothing.)
 
-(--- shared prelude: guarantees every value below is DEFINED ---)
 $SD/Run=/Probing/ProbeInit.nc
 
-#<_startz>=#<_abs_z>
+#<_start_abs_x>=#<_abs_x>
+#<_start_abs_y>=#<_abs_y>
+#<_start_abs_z>=#<_abs_z>
 
-(--- fast find, back off, slow accurate touch, all downward ---)
-G91
-G38.2 Z[0 - [#<_probe_clearance> + #<_probe_overtravel>]] F#<_probe_feed_fast>
-G0 Z#<_probe_backoff>
-G38.2 Z[0 - [#<_probe_backoff> * 2]] F#<_probe_feed_slow>
-G90
+#<_ps_ux>=0
+#<_ps_uy>=0
+#<_ps_uz>=-1
+#<_ps_rotate>=0
+$SD/Run=/Probing/_ProbeSurface.nc
 
 (--- position deviation: expected surface was clearance below the start ---)
-#<_expected>=[#<_startz> - #<_probe_clearance>]
-#<_probe_dev_pos>=[ABS[#5063 - #<_expected>]]
+#<_expected>=[#<_start_abs_z> - #<_probe_clearance>]
+#<_probe_dev_pos>=[ABS[#<_ps_z> - #<_expected>]]
 #<_probe_dev_size>=0
 
-G10 L20 P0 Z0
-G91
-G0 Z#<_probe_clearance>
-G90
+(--- declare the origin WITHOUT moving ---)
+(G10 L20 sets the offset from wherever the probe is standing:)
+(    offset = MPos - TLO - value)
+(To make the found feature read its nominal N while parked at P, emit)
+(    N + [P - found]      -- the TLO cancels out.)
+()
+(This way the probe NEVER drives back toward the surface it just measured.)
+(Parking the controlled point ON the surface would bury the ball by a full)
+(tip radius and snap the stylus, and any over-travel past the deflection)
+(limit of the probe would do the same.)
+G10 L20 P#<_probe_wcs> Z[#<_probe_nom_z> + [#<_abs_z> - #<_ps_z>]]
 (MSG: Z surface probed, WCS Z0 set)
 
 $SD/Run=/Probing/ProbeCheckTolerance.nc

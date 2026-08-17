@@ -1,41 +1,48 @@
 (ProbeYEdge.nc)
-(Single-axis Y edge probe. Fusion cycle "probing-y", and one half of)
-(XY corner probing. Sets Y0 in the active work offset at the true)
-(surface, compensating for the effective probe radius -- tip radius minus)
-(pre-travel -- so the zero lands on the surface, not past it.)
+(Single axis Y edge probe. Fusion cycle "probing-y", and one half)
+(of XY corner probing.)
 ()
-(  #<_probe_axis_dir>     +1 to probe toward +Y, -1 to probe toward -Y)
-(  #<_probe_clearance>    standoff at which the fast probe begins)
-(  #<_probe_overtravel>   how far past nominal before it is a miss)
-(  #<_probe_feed_fast>    first touch feed)
-(  #<_probe_feed_slow>    second, accurate touch feed)
+(Sets Y0 in the TARGET work offset at the true surface, compensating for)
+(the effective probe radius - tip radius minus pre travel - so the zero)
+(lands on the surface rather than at the ball centre.)
+()
+(Runout is cancelled by _ProbeSurface: it touches, retracts, pauses for a)
+(180 degree spindle rotation, touches again and averages. On a single)
+(edge this matters more than on a centre, because there is no opposite)
+(wall for the error to partly offset against.)
 
-(--- shared prelude: guarantees every value below is DEFINED ---)
 $SD/Run=/Probing/ProbeInit.nc
 
+#<_start_abs_x>=#<_abs_x>
+#<_start_abs_y>=#<_abs_y>
+#<_start_abs_z>=#<_abs_z>
 #<_dir>=#<_probe_axis_dir>
-#<_start>=#<_abs_y>
 
-(--- fast find, back off, slow accurate touch ---)
-G91
-G38.2 Y[#<_dir> * [#<_probe_clearance> + #<_probe_overtravel>]] F#<_probe_feed_fast>
-G0 Y[0 - [#<_dir> * #<_probe_backoff>]]
-G38.2 Y[#<_dir> * [#<_probe_backoff> * 2]] F#<_probe_feed_slow>
-G90
+#<_ps_ux>=0
+#<_ps_uy>=[#<_dir>]
+#<_ps_uz>=0
+#<_ps_rotate>=1
+$SD/Run=/Probing/_ProbeSurface.nc
 
-(--- true surface = trigger + dir * effective radius ---)
-#<_surface>=[#5062 + [#<_dir> * #<_probe_eff_radius>]]
+(--- true surface = averaged trigger + dir * effective radius ---)
+#<_surface>=[#<_ps_y> + [#<_dir> * #<_probe_eff_radius>]]
 
-(--- an edge has no size, only position: how far from where we expected)
-(the surface, which was #<_probe_clearance> along dir from the start ---)
-#<_expected>=[#<_start> + [#<_dir> * #<_probe_clearance>]]
+(--- an edge has no size, only position ---)
+#<_expected>=#<_start_abs_y>
 #<_probe_dev_pos>=[ABS[#<_surface> - #<_expected>]]
 #<_probe_dev_size>=0
 
-G10 L20 P0 Y[0 - [#<_dir> * #<_probe_eff_radius>]]
-G91
-G0 Y[0 - [#<_dir> * #<_probe_clearance>]]
-G90
+(--- declare the origin WITHOUT moving ---)
+(G10 L20 sets the offset from wherever the probe is standing:)
+(    offset = MPos - TLO - value)
+(To make the found feature read its nominal N while parked at P, emit)
+(    N + [P - found]      -- the TLO cancels out.)
+()
+(This way the probe NEVER drives back toward the surface it just measured.)
+(Parking the controlled point ON the surface would bury the ball by a full)
+(tip radius and snap the stylus, and any over-travel past the deflection)
+(limit of the probe would do the same.)
+G10 L20 P#<_probe_wcs> Y[#<_probe_nom_y> + [#<_abs_y> - #<_surface>]]
 (MSG: Y edge probed, WCS Y0 set)
 
 $SD/Run=/Probing/ProbeCheckTolerance.nc

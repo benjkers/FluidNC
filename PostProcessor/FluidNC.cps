@@ -122,6 +122,14 @@ properties = {
     value      : true,
     scope      : "post"
   },
+  probeDumpCycleProps: {
+    title      : "Probe: dump cycle properties",
+    description: "Diagnostic only. Writes every property Fusion exposes on a probing cycle into the output as comments, so the real property names and values can be read off. Leave off for normal use.",
+    group      : "preferences",
+    type       : "boolean",
+    value      : false,
+    scope      : "post"
+  },
   probePartialAngle1: {
     title      : "Partial hole: probe angle 1",
     description: "Direction of the first touch for partial circular hole probing, in degrees CCW from +X. All three angles must lie inside the arc the probe can actually reach, or the stylus will be driven into material.",
@@ -407,8 +415,15 @@ function onSpindleSpeed(spindleSpeed) {
 // used for the second (accurate) touch. Falls back to a fraction of the
 // cycle's normal probe feed if the operation didn't set one.
 var probeFeedSlow = undefined;
+// Fusion's "link" feed rate -- the speed for positioning moves made with
+// the probe in the spindle. Every such move is protected, so this is the
+// speed at which a G38.3 travels before it hits anything.
+var probeFeedLink = undefined;
 
 function onParameter(name, value) {
+  if (name == "operation:tool_feedProbeLink") {
+    probeFeedLink = value;
+  }
   if (name == "operation:tool_feedProbeMeasure") {
     probeFeedSlow = value;
   }
@@ -421,12 +436,43 @@ function runProbeMacro(name) {
   writeBlock("$SD/Run=" + PROBING_DIR + name);
 }
 
-// Fusion's out-of-tolerance / out-of-position actions. Anything that
-// isn't an explicit "warning only" is treated as stop-the-program, which
-// is the safe direction to err in for an inspection result.
+// Diagnostic: dump every property Fusion exposes on the probing cycle,
+// as comments. Turn on the "Probe: dump cycle properties" post property,
+// post one operation, and the output lists the real property names and
+// values -- which beats guessing at them one at a time.
+function dumpCycleProperties() {
+  if (!getProperty("probeDumpCycleProps")) {
+    return;
+  }
+  writeComment("---- cycle properties ----");
+  for (var k in cycle) {
+    try {
+      writeComment("cycle." + k + " = " + cycle[k]);
+    } catch (e) {
+      writeComment("cycle." + k + " = <unreadable>");
+    }
+  }
+  writeComment("---- section probe properties ----");
+  var names = ["probeWorkOffset", "strategy", "hasParameter"];
+  for (var i = 0; i < names.length; ++i) {
+    try {
+      writeComment("currentSection." + names[i] + " = " + currentSection[names[i]]);
+    } catch (e2) {
+      writeComment("currentSection." + names[i] + " = <unreadable>");
+    }
+  }
+  writeComment("---- end ----");
+}
+
+// Fusion's out-of-position / wrong-size actions. Confirmed by dumping the
+// cycle properties: the property only EXISTS when the corresponding box is
+// ticked in the operation, and its value is a string such as
+// "stop-message". Undefined therefore means the operator did not ask for an
+// action, so we report the deviation but let the program continue -- the
+// previous behaviour of defaulting to "stop" made the checkbox do nothing.
 function isStopAction(action) {
   if (action === undefined) {
-    return true;
+    return false;
   }
   return String(action).indexOf("warning") < 0;
 }
@@ -436,20 +482,58 @@ function isStopAction(action) {
 // gcode error in FluidNC and aborts the controller, so no macro should
 // ever have to guess whether a value was set.
 function writeProbeParams(extra) {
+  dumpCycleProperties();
   var slowFeed = probeFeedSlow ? probeFeedSlow : cycle.feedrate / 4;
   writeBlock("#<_probe_clearance>=" + xyzFormat.format(cycle.probeClearance || 0));
   writeBlock("#<_probe_overtravel>=" + xyzFormat.format(cycle.probeOvertravel || 0));
   writeBlock("#<_probe_feed_fast>=" + feedFormat.format(cycle.feedrate));
   writeBlock("#<_probe_feed_slow>=" + feedFormat.format(slowFeed));
+  // Speed for PROTECTED positioning moves inside the macros. Every move
+  // made with the probe in the spindle is a G38.3, so this is how fast it
+  // travels before it meets anything.
+  writeBlock("#<_probe_feed_link>=" + feedFormat.format(probeFeedLink ? probeFeedLink : cycle.feedrate));
   // Nominal stylus radius from the tool library. ProbeInit.nc uses this
   // only as the FALLBACK for #<_probe_yaw> -- the calibrated effective
   // X/Y probe radius -- so probing still works before yaw is calibrated.
-  writeBlock("#<_probe_tool_radius>=" + xyzFormat.format(tool.diameter / 2));
+  writeBlock("#<_probe_tool_radius>=" + xyzFormat.format(tool.diameter / 2));
   writeBlock("#<_probe_safe_z>=" + xyzFormat.format((extra && extra.safeZ) ? extra.safeZ : 0));
   // Fusion's inspection tolerances. 0 disables a check. Actions map to
   // 0 = warn only, 1 = alarm and stop the program.
-  writeBlock("#<_probe_tol_size>=" + xyzFormat.format(cycle.toleranceSize || 0));
-  writeBlock("#<_probe_tol_pos>=" + xyzFormat.format(cycle.tolerancePosition || 0));
+  // WHICH offset the result is written to. Fusion's WCS probing lets you
+  // drive the probe from one offset and write the result into another, so
+  // this must not be assumed to be the active one. 0 = active offset.
+  // The target offset is a SECTION property in Fusion, not a cycle one.
+  // Reading cycle.probeWorkOffset silently yielded 0, so every probe
+  // wrote to the ACTIVE offset regardless of the WCS Offset set in the
+  // operation.
+  var wcsTarget = (typeof currentSection.probeWorkOffset != "undefined") ? currentSection.probeWorkOffset : 0;
+  writeBlock("#<_probe_wcs>=" + wcsTarget);
+  // The NOMINAL position of the feature in that offset. The probed feature
+  // is usually NOT at the origin, so the origin is placed such that the
+  // found feature lands on these coordinates.
+  if (extra && extra.nomX !== undefined) {
+    writeBlock("#<_probe_nom_x>=" + xyzFormat.format(extra.nomX));
+  }
+  if (extra && extra.nomY !== undefined) {
+    writeBlock("#<_probe_nom_y>=" + xyzFormat.format(extra.nomY));
+  }
+  if (extra && extra.nomZ !== undefined) {
+    writeBlock("#<_probe_nom_z>=" + xyzFormat.format(extra.nomZ));
+  }
+  // Fusion exposes explicit enable flags for each tolerance, so use those
+  // rather than inferring from the value:
+  //   cycle.hasPositionalTolerance / cycle.hasSizeTolerance
+  //
+  // HALVING IS REQUIRED. The operation field is a +/- figure but the API
+  // reports the FULL band: +/-0.2 in the UI comes back as 0.4, and +/-1.00
+  // comes back as 2. The macros compare an ABSOLUTE deviation from nominal
+  // against this limit, so they need the +/- half, not the whole band.
+  // Only the POSITION tolerance is a +/- band that the API reports doubled.
+  // The SIZE tolerance comes through as typed, so it must NOT be halved.
+  var tolSize = cycle.hasSizeTolerance ? (cycle.toleranceSize || 0) : 0;
+  var tolPos  = cycle.hasPositionalTolerance ? (cycle.tolerancePosition || 0) / 2 : 0;
+  writeBlock("#<_probe_tol_size>=" + xyzFormat.format(tolSize));
+  writeBlock("#<_probe_tol_pos>=" + xyzFormat.format(tolPos));
   writeBlock("#<_probe_action_size>=" + (isStopAction(cycle.wrongSizeAction) ? 1 : 0));
   writeBlock("#<_probe_action_pos>=" + (isStopAction(cycle.outOfPositionAction) ? 1 : 0));
   if (extra && extra.widthX !== undefined) {
@@ -460,21 +544,124 @@ function writeProbeParams(extra) {
   }
 }
 
-function probeAxisEdge(axis, dir) {
-  writeProbeParams({});
+// The Z of the surface actually being probed. Fusion's Bottom Height,
+// which for a probing cycle is the probing surface. NOT the z handed to
+// onCyclePoint -- that is the RETRACT height, and using it set the origin
+// high by exactly the retract offset.
+function probedSurfaceZ(z) {
+  return (cycle.bottom !== undefined) ? cycle.bottom : z;
+}
+
+// Rapid is only safe ABOVE the retract height. Anything below it may be
+// inside the part, so we drop to retract at rapid and then make a
+// PROTECTED move (G38.3) the rest of the way: it stops on contact instead
+// of driving the stylus into material. This is what makes plunging into a
+// bore or pocket safe when the feature is not quite where CAM thinks.
+// Emit a PROTECTED move, always with an explicit feed.
+//
+// feedOutput is modal, but the macros set their own feeds internally
+// (F1000 for the fast touch, F50 for the slow one) and the post cannot see
+// that. Left modal, the post would believe F is still the link feed on the
+// next operation and suppress it -- so the protected moves would inherit
+// F50 from the previous macro and crawl. Resetting forces it out every
+// time, which costs one word and removes the whole class of problem.
+function protectedMove(words) {
+  // Drop any axis word the modal formatter suppressed. If NOTHING is left
+  // the probe is already where we want it, and emitting a bare "G38.3 F..."
+  // with no axis word is a gcode error -- so skip the block entirely.
+  var out = [];
+  for (var i = 0; i < words.length; ++i) {
+    if (words[i]) {
+      out.push(words[i]);
+    }
+  }
+  if (out.length == 0) {
+    return;
+  }
+  // feedOutput is modal, but the macros set their own feeds internally
+  // (F1000 fast, F50 slow) and the post cannot see that. Left modal it
+  // would suppress F on the next operation and the move would inherit the
+  // leftover F50 and crawl. Reset forces it out every time.
+  feedOutput.reset();
+  out.unshift("G38.3");
+  out.push(feedOutput.format(probeFeedLink ? probeFeedLink : cycle.feedrate));
+  writeBlock.apply(null, out);
+}
+
+function safeMoveZ(targetZ) {
+  // EVERY Z move made with the probe in the spindle is a PROTECTED move.
+  // Not just the part below the retract plane -- the descent from the
+  // clearance plane down to retract can still meet a clamp, a fixture or a
+  // part that is not where CAM thinks, and a rapid there snaps the stylus.
+  // G38.3 stops on contact instead, and unlike G38.2 it does not alarm if
+  // nothing is touched, so it behaves as a positioning move when the path
+  // is clear.
+  //
+  // Speed is Fusion's LINK feed rate, which exists precisely for probe
+  // positioning moves. Falls back to the cycle feed if the operation did
+  // not supply one.
+  var retract  = (cycle.retract !== undefined) ? cycle.retract : targetZ;
+
+  if (targetZ >= retract) {
+    protectedMove([zOutput.format(targetZ)]);
+    return;
+  }
+  // Two stages so the change of plane is visible in the output, but both
+  // are protected.
+  protectedMove([zOutput.format(retract)]);
+  protectedMove([zOutput.format(targetZ)]);
+}
+
+// Stand the probe off from a surface before an edge touch, so the macro's
+// clearance+overtravel reach actually spans it. The macro compensates the
+// tip radius, but the ball still physically occupies it.
+function standoffFor() {
+  return (cycle.probeClearance || 0) + tool.diameter / 2;
+}
+
+// Single-axis edge probe.
+//
+// IMPORTANT: the caller passes the APPROACH point -- the ball-centre
+// position standing off from the surface by clearance + tip radius -- not
+// the surface itself. The surface is derived from it.
+//
+// For "probing-x" / "probing-y" Fusion's cycle point ALREADY is that
+// approach point: on a surface measured at X-82.5 with 10 mm approach and
+// a 2.5 mm tip radius, onCyclePoint receives X-95. Offsetting it again
+// stood the probe 25 mm off, so it never reached the surface and the probe
+// alarmed -- and the origin would have been set 12.5 mm out as well.
+//
+// For corner cycles Fusion gives the CORNER, so that caller subtracts the
+// standoff itself before calling. Either way this function receives an
+// approach point and recovers the surface the same way.
+function probeAxisEdge(axis, dir, ax, ay, z) {
+  var so = standoffFor();
+  var surfaceX = (axis == "X") ? (ax + dir * so) : ax;
+  var surfaceY = (axis == "Y") ? (ay + dir * so) : ay;
+  writeProbeParams({nomX: surfaceX, nomY: surfaceY});
+  if (z !== undefined) {
+    safeMoveZ(probedSurfaceZ(z));
+  }
+  protectedMove([xOutput.format(ax), yOutput.format(ay)]);
   writeBlock("#<_probe_axis_dir>=" + dir);
   runProbeMacro("Probe" + axis + "Edge.nc");
 }
 
-function probeZSurface() {
-  // Route through writeProbeParams so the Z cycle gets the tolerance and
-  // action values too -- it used to write its own subset and silently
-  // skipped them, so out-of-position never fired on a Z probe.
-  writeProbeParams({});
-  // Z uses the operation's clearance if it defines one, else the standoff.
-  if (cycle.clearance !== undefined) {
-    writeBlock("#<_probe_clearance>=" + xyzFormat.format(cycle.clearance));
-  }
+function probeZSurface(nz, z) {
+  // Fusion leaves the probe at the CLEARANCE PLANE, not at a probing
+  // standoff, so the post has to bring it down to the approach point
+  // itself. Without this the macro probes clearance+overtravel from
+  // wherever Fusion parked it and never reaches the surface.
+  //
+  // Note we must NOT feed cycle.clearance into #<_probe_clearance> -- that
+  // is the absolute retract plane, not a standoff distance. Doing so made
+  // the macro expect the surface 65 mm below the start and false-trip the
+  // out-of-position alarm.
+  var surfaceZ = probedSurfaceZ(z);
+  writeProbeParams({nomZ: surfaceZ});
+  // sit the probe one approach distance above the surface, then let the
+  // macro probe clearance+overtravel downward through it
+  safeMoveZ(surfaceZ + (cycle.probeClearance || 0));
   runProbeMacro("ProbeZSurface.nc");
 }
 
@@ -488,48 +675,56 @@ function islandLift() {
   return tool.diameter;
 }
 
-function probeChannel(axis, width, withIsland) {
+function probeChannel(axis, width, withIsland, nx, ny, z) {
   writeProbeParams({
     widthX: (axis == "X") ? width : undefined,
     widthY: (axis == "Y") ? width : undefined,
-    safeZ:  withIsland ? islandLift() : 0
+    safeZ:  withIsland ? islandLift() : 0,
+    nomX: nx, nomY: ny
   });
+  safeMoveZ(probedSurfaceZ(z));
   runProbeMacro("Probe" + axis + "Channel.nc");
 }
 
-function probeWeb(axis, width) {
+function probeWall(axis, width, nx, ny, z) {
   // A web is external, so the probe must clear the top of the part while
   // moving out past each face -- the lift is mandatory, not optional.
   writeProbeParams({
     widthX: (axis == "X") ? width : undefined,
     widthY: (axis == "Y") ? width : undefined,
-    safeZ:  islandLift()
+    safeZ:  islandLift(),
+    nomX: nx, nomY: ny
   });
-  runProbeMacro("Probe" + axis + "Web.nc");
+  safeMoveZ(probedSurfaceZ(z));
+  runProbeMacro("Probe" + axis + "Wall.nc");
 }
 
-function probeInnerXY(widthX, widthY, withIsland) {
+function probeInnerXY(widthX, widthY, withIsland, nx, ny, z) {
   writeProbeParams({
     widthX: widthX,
     widthY: widthY,
-    safeZ:  withIsland ? islandLift() : 0
+    safeZ:  withIsland ? islandLift() : 0,
+    nomX: nx, nomY: ny
   });
+  safeMoveZ(probedSurfaceZ(z));
   runProbeMacro("ProbeInnerXY.nc");
 }
 
-function probePartialHole(dia, withIsland) {
-  writeProbeParams({widthX: dia, widthY: dia, safeZ: withIsland ? islandLift() : 0});
+function probePartialHole(dia, withIsland, nx, ny, z) {
+  writeProbeParams({widthX: dia, widthY: dia, safeZ: withIsland ? islandLift() : 0, nomX: nx, nomY: ny});
   writeBlock("#<_probe_diameter>=" + xyzFormat.format(dia));
   writeBlock("#<_probe_angle_1>=" + xyzFormat.format(getProperty("probePartialAngle1")));
   writeBlock("#<_probe_angle_2>=" + xyzFormat.format(getProperty("probePartialAngle2")));
   writeBlock("#<_probe_angle_3>=" + xyzFormat.format(getProperty("probePartialAngle3")));
+  safeMoveZ(probedSurfaceZ(z));
   runProbeMacro("ProbePartialHole.nc");
 }
 
-function probeOuterXY(widthX, widthY) {
+function probeOuterXY(widthX, widthY, nx, ny, z) {
   // A boss ALWAYS needs a lift -- the probe has to get out past each face
   // and back down beside it without dragging over the top.
-  writeProbeParams({widthX: widthX, widthY: widthY, safeZ: islandLift()});
+  writeProbeParams({widthX: widthX, widthY: widthY, safeZ: islandLift(), nomX: nx, nomY: ny});
+  safeMoveZ(probedSurfaceZ(z));
   runProbeMacro("ProbeOuterXY.nc");
 }
 
@@ -547,15 +742,15 @@ function onCyclePoint(x, y, z) {
   // ---- single axis ------------------------------------------------
   case "probing-x":
     writeComment("Probing X edge");
-    probeAxisEdge("X", (cycle.approach1 == "positive") ? 1 : -1);
+    probeAxisEdge("X", (cycle.approach1 == "positive") ? 1 : -1, x, y, z);
     break;
   case "probing-y":
     writeComment("Probing Y edge");
-    probeAxisEdge("Y", (cycle.approach1 == "positive") ? 1 : -1);
+    probeAxisEdge("Y", (cycle.approach1 == "positive") ? 1 : -1, x, y, z);
     break;
   case "probing-z":
     writeComment("Probing Z surface");
-    probeZSurface();
+    probeZSurface(z, z);
     break;
 
   // ---- corners ----------------------------------------------------
@@ -570,41 +765,45 @@ function onCyclePoint(x, y, z) {
     var dirX = (cycle.approach1 == "positive") ? 1 : -1;
     var dirY = (cycle.approach2 == "positive") ? 1 : -1;
     var standoff = cycle.probeClearance + tool.diameter / 2;
-    writeBlock(gMotionModal.format(0), xOutput.format(x - dirX * standoff), yOutput.format(y));
-    probeAxisEdge("X", dirX);
-    writeBlock(gMotionModal.format(0), xOutput.format(x), yOutput.format(y - dirY * standoff));
-    probeAxisEdge("Y", dirY);
+    probeAxisEdge("X", dirX, x - dirX * standoff, y, z);
+    probeAxisEdge("Y", dirY, x, y - dirY * standoff, z);
     writeComment("XY corner probed");
     break;
 
   // ---- channels / slots -------------------------------------------
   case "probing-x-channel":
     writeComment("Probing X channel");
-    probeChannel("X", wx, false);
+    probeChannel("X", wx, false, x, y, z);
     break;
   case "probing-x-channel-with-island":
     writeComment("Probing X channel with island");
-    probeChannel("X", wx, true);
+    probeChannel("X", wx, true, x, y, z);
     break;
   case "probing-y-channel":
     writeComment("Probing Y channel");
-    probeChannel("Y", wy, false);
+    probeChannel("Y", wy, false, x, y, z);
     break;
   case "probing-y-channel-with-island":
     writeComment("Probing Y channel with island");
-    probeChannel("Y", wy, true);
+    probeChannel("Y", wy, true, x, y, z);
     break;
 
   // ---- webs: two OUTSIDE walls measured across one axis --------------
   // The external counterpart of a channel -- e.g. probing both sides of
   // a part or a rib to find its centreline in one axis.
+  // Fusion calls these WALL cycles: the two OUTSIDE faces either side of a
+  // part, the external counterpart of a channel. I originally guessed at
+  // "-web" from Renishaw terminology; the real string is "-wall". Both are
+  // listed since an alias costs nothing and a missed cycle silently skips.
+  case "probing-x-wall":
   case "probing-x-web":
-    writeComment("Probing X web");
-    probeWeb("X", wx);
+    writeComment("Probing X wall pair");
+    probeWall("X", wx, x, y, z);
     break;
+  case "probing-y-wall":
   case "probing-y-web":
-    writeComment("Probing Y web");
-    probeWeb("Y", wy);
+    writeComment("Probing Y wall pair");
+    probeWall("Y", wy, x, y, z);
     break;
 
   // ---- circular bores / bosses ------------------------------------
@@ -612,29 +811,29 @@ function onCyclePoint(x, y, z) {
   // both the diameter, so these share the rectangular macros.
   case "probing-xy-circular-hole":
     writeComment("Probing circular hole");
-    probeInnerXY(dia, dia, false);
+    probeInnerXY(dia, dia, false, x, y, z);
     break;
   case "probing-xy-circular-hole-with-island":
     writeComment("Probing circular hole with island");
-    probeInnerXY(dia, dia, true);
+    probeInnerXY(dia, dia, true, x, y, z);
     break;
   case "probing-xy-circular-boss":
     writeComment("Probing circular boss");
-    probeOuterXY(dia, dia);
+    probeOuterXY(dia, dia, x, y, z);
     break;
 
   // ---- rectangular pockets / bosses -------------------------------
   case "probing-xy-rectangular-hole":
     writeComment("Probing rectangular hole");
-    probeInnerXY(wx, wy, false);
+    probeInnerXY(wx, wy, false, x, y, z);
     break;
   case "probing-xy-rectangular-hole-with-island":
     writeComment("Probing rectangular hole with island");
-    probeInnerXY(wx, wy, true);
+    probeInnerXY(wx, wy, true, x, y, z);
     break;
   case "probing-xy-rectangular-boss":
     writeComment("Probing rectangular boss");
-    probeOuterXY(wx, wy);
+    probeOuterXY(wx, wy, x, y, z);
     break;
 
   // ---- deliberately not implemented -------------------------------
@@ -651,7 +850,7 @@ function onCyclePoint(x, y, z) {
   case "probing-xy-circular-partial-hole":
   case "probing-xy-circular-partial-hole-with-island":
     writeComment("Probing partial circular hole (3 point)");
-    probePartialHole(dia, cycleType.indexOf("island") >= 0);
+    probePartialHole(dia, cycleType.indexOf("island") >= 0, x, y, z);
     break;
 
   // A partial BOSS would need the probe to approach each touch from
