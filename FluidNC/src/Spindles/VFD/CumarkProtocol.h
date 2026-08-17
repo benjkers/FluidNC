@@ -3,6 +3,7 @@
 #include "VFDProtocol.h"
 #include "../../Types.h"
 #include "../../Config.h"
+#include <vector>
 
 namespace Spindles {
     namespace VFD {
@@ -110,6 +111,45 @@ namespace Spindles {
             // 50.03 Act1 src isn't pointed at P.01.22.
             uint32_t _zero_torque_polls = 0;
 
+            // ---------------------------------------------------------------
+            // Speed-dependent behaviour, all driven by MEASURED tables.
+            //
+            // This spindle is 8-pole: 400 Hz at 6000 rpm, 1200 Hz at 18000.
+            // Above base speed the drive is voltage-capped, flux thins, and
+            // both the available torque and the trustworthiness of the
+            // drive's estimates fall away sharply. Measured on this machine:
+            //
+            //   rpm    idle torque   net torque at pull-out
+            //   3000      -1.6%              101.6%
+            //   6000      -4.5%               74.5%
+            //   9000      -3.2%               38.2%
+            //  12000      -2.3%               22.3%
+            //  15000      -1.9%               11.9%
+            //  18000      -1.6%                4.6%
+            //
+            // No single power law fits the pull-out curve (the fitted
+            // exponent drifts from 0.5 to 2.0 as pull-out torque, falling
+            // as 1/f^2, overtakes capability, falling as 1/f), so the
+            // measured table is used directly.
+            // ---------------------------------------------------------------
+            float _last_torque_raw = 0.0f;   // signed, BEFORE baseline subtraction
+            float _last_rpm        = 0.0f;   // actual speed from the same poll
+
+            std::vector<float> _baseline_rpm;    // no-load torque calibration
+            std::vector<float> _baseline_pct;
+            std::vector<float> _available_rpm;   // net torque at pull-out
+            std::vector<float> _available_pct;
+
+            // Above this speed tier 3 stops regulating and leaves the job to
+            // tiers 1 and 2. Full RPM remains available.
+            float _adaptive_max_rpm     = 12000.0f;
+            float _goal_safety_fraction = 0.70f;  // tier 3 goal ceiling, x available
+            float _tier2_fraction       = 0.85f;  // tier 2 trip point, x available
+            bool  _goal_clamp_logged    = false;
+
+            float torque_baseline(float rpm) const;
+            float available_torque_percent(float rpm) const;
+
             void apply_adaptive_feed();
 
             // One Modbus transaction covering the whole fieldbus data set
@@ -139,6 +179,13 @@ namespace Spindles {
                 handler.item("adaptive_feed_gain_up", _adaptive_feed_gain_up);
                 handler.item("adaptive_feed_deadband_percent", _adaptive_feed_deadband_percent, 0, 50);
                 handler.item("adaptive_feed_aggressive_step", _adaptive_feed_aggressive_step, 1, 100);
+                handler.item("adaptive_max_rpm", _adaptive_max_rpm);
+                handler.item("goal_safety_fraction", _goal_safety_fraction, 0.1f, 1.0f);
+                handler.item("tier2_fraction", _tier2_fraction, 0.5f, 1.0f);
+                handler.item("torque_baseline_rpm", _baseline_rpm);
+                handler.item("torque_baseline_pct", _baseline_pct);
+                handler.item("available_torque_rpm", _available_rpm);
+                handler.item("available_torque_pct", _available_pct);
             }
         };
     }

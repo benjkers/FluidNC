@@ -160,7 +160,7 @@ start:
   must_home: true
 
 atc_custom:
-  ets_mpos_mm: -22.400 -22.000 -296.533
+  ets_mpos_mm: -22.400 -22.000 -294
   ets_rapid_z_offset_mm: 10.000
   ets_probe_overtravel_mm: 4.000
   ets_slow_approach_feed_mm_min: 200.000
@@ -199,10 +199,17 @@ Cumark:
   spindown_ms: 6000
   speed_map: 0=0.000% 0=3.000% 540=3.000% 18000=100.000%
   off_on_alarm: true
-  adaptive_feed_floor_percent: 10
+  adaptive_feed_floor_percent: 20
   adaptive_feed_min_percent: 25
   adaptive_feed_max_percent: 150
   adaptive_feed_gain_down: 2.0
   adaptive_feed_gain_up: 0.5
   adaptive_feed_deadband_percent: 2
   adaptive_feed_aggressive_step: 50
+  torque_baseline_rpm: 0 3000 6000 9000 12000 15000 18000
+  torque_baseline_pct: 0 -1.6 -4.5 -3.2 -2.3 -1.9 -1.6
+  available_torque_rpm: 0 3000 6000 9000 12000 15000 18000
+  available_torque_pct: 101.6 101.6 74.5 38.2 22.3 11.9 4.6
+  adaptive_max_rpm: 12000
+  goal_safety_fraction: 0.70
+  tier2_fraction: 0.85

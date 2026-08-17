@@ -165,9 +165,26 @@ namespace Spindles {
 
                 auto* self = static_cast<CumarkProtocol*>(detail);
 
-                // Torque can read negative during regenerative deceleration;
-                // only the magnitude matters for stall risk.
-                self->_last_torque_percent = std::abs(float(act1) / 10.0f);
+                // RAW torque, SIGNED. Do not take the magnitude: negative
+                // means the spindle is being driven rather than loaded, so
+                // abs() invents load at idle and inverts the response during
+                // a pull-out -- exactly the wrong way round.
+                float raw_torque = float(act1) / 10.0f;
+                float rpm        = float(std::abs((int)act2));
+
+                // The drive's estimate carries a speed-dependent NEGATIVE
+                // offset. Flux-angle lag leaks magnetising current into the
+                // torque axis; the lag grows with output frequency while the
+                // magnetising current is fixed below base speed and falls
+                // above it -- so the offset peaks near base speed. Measured
+                // on this machine: -1.6% at 3000, -4.5% at 6000, easing to
+                // -1.6% by 18000. Subtracting the measured curve makes zero
+                // mean zero load, and also removes windage and iron loss.
+                float net_torque = raw_torque - self->torque_baseline(rpm);
+
+                self->_last_torque_raw     = raw_torque;   // keep for diagnostics
+                self->_last_rpm            = rpm;
+                self->_last_torque_percent = std::max(net_torque, 0.0f);
                 self->_last_torque_limited = torque_limited;
                 self->_last_warning        = alarm;
 
@@ -227,6 +244,7 @@ namespace Spindles {
             }
 
             _adaptive_feed_goal_percent = goal_fraction * 100.0f;
+            _goal_clamp_logged          = false;  // re-arm the clamp warning for this new goal
 
             if (_adaptive_feed_goal_percent > 0.0f) {
                 // Capture whatever the operator already has dialed in right
@@ -279,6 +297,47 @@ namespace Spindles {
             if (is_hard_trigger) {
                 log_warn("CumarkProtocol: torque limited/warning (drive-reported), feed override dropped to " << int(target) << "%");
             }
+        }
+
+        // --------------------------------------------------------------
+        // Linear interpolation over a measured (rpm -> value) table, with
+        // the end values held flat outside the measured range. Returns
+        // fallback when no table is configured, so an uncalibrated machine
+        // behaves exactly as before.
+        // --------------------------------------------------------------
+        static float interp_table(const std::vector<float>& xs, const std::vector<float>& ys, float x, float fallback) {
+            const size_t n = xs.size();
+            if (n == 0 || ys.size() != n) {
+                return fallback;
+            }
+            if (x <= xs[0])     return ys[0];
+            if (x >= xs[n - 1]) return ys[n - 1];
+            for (size_t i = 1; i < n; ++i) {
+                if (x <= xs[i]) {
+                    const float span = xs[i] - xs[i - 1];
+                    if (span <= 0.0f) return ys[i];
+                    const float t = (x - xs[i - 1]) / span;
+                    return ys[i - 1] + t * (ys[i] - ys[i - 1]);
+                }
+            }
+            return ys[n - 1];
+        }
+
+        // Measured no-load torque reading at this speed. NEGATIVE by nature
+        // -- see the note in the block-read parser. Zero if uncalibrated.
+        float CumarkProtocol::torque_baseline(float rpm) const {
+            return interp_table(_baseline_rpm, _baseline_pct, rpm, 0.0f);
+        }
+
+        // Measured NET torque (baseline already removed) at which the
+        // spindle actually pulls out, as a percent of rated. This is a
+        // measured table rather than a formula because no single power law
+        // fits: the falloff steepens with speed as pull-out torque (which
+        // falls as 1/f^2) overtakes torque capability (1/f). Measured here
+        // as roughly 102% at 3000 rpm collapsing to under 5% at 18000.
+        // Returns 100% if uncalibrated, i.e. no clamping.
+        float CumarkProtocol::available_torque_percent(float rpm) const {
+            return interp_table(_available_rpm, _available_pct, rpm, 100.0f);
         }
 
         void CumarkProtocol::apply_adaptive_feed() {
@@ -337,7 +396,12 @@ namespace Spindles {
             }
 
             // ---- Tier 2: aggressive overtorque slowdown -- ALWAYS active. ----
-            if (_last_torque_percent >= 100.0f) {
+            // Threshold TRACKS the measured torque ceiling. A fixed 100%
+            // was unreachable above base speed -- this spindle pulls out at
+            // 20% by 12000 rpm and 3% by 18000 -- so tier 2 was effectively
+            // switched off exactly where it mattered most.
+            const float t2_trip = _tier2_fraction * available_torque_percent(_last_rpm);
+            if (_last_torque_percent >= t2_trip) {
                 uint32_t rate_step = uint32_t(float(_adaptive_feed_aggressive_step) * dt_s + 0.5f);
                 if (rate_step < 1) {
                     rate_step = 1;  // always make some progress toward the floor
@@ -350,9 +414,32 @@ namespace Spindles {
             }
 
             // ---- Tier 3: goal-seeking -- only when M52 has set a goal. ----
-            if (_adaptive_feed_goal_percent <= 0.0f) {return;}  // disabled by M52 P0}
+            if (_adaptive_feed_goal_percent <= 0.0f) {return;}  // disabled by M52 P0
 
-            float error    = _last_torque_percent - _adaptive_feed_goal_percent;
+            // REGIME GATE. Above this speed there is nothing worth
+            // regulating: measured net available torque is 11.9% at 15000
+            // and 4.6% at 18000, so the deadband alone would be a quarter
+            // to two thirds of the entire goal. The torque and speed
+            // estimates are also least trustworthy up here. Stop
+            // REGULATING and leave protection to tiers 1 and 2. Full RPM
+            // stays available -- we simply stop pretending to modulate it.
+            if (_adaptive_max_rpm > 0.0f && _last_rpm > _adaptive_max_rpm) {
+                return;
+            }
+
+            // Clamp the goal to something the spindle can actually hold at
+            // this speed. Without it the loop chases an unreachable target
+            // and rides the override to maximum, which is how a pull-out
+            // begins.
+            const float goal_cap = _goal_safety_fraction * available_torque_percent(_last_rpm);
+            float effective_goal = std::min(_adaptive_feed_goal_percent, goal_cap);
+            if (effective_goal < _adaptive_feed_goal_percent && !_goal_clamp_logged) {
+                _goal_clamp_logged = true;
+                log_warn("CumarkProtocol: adaptive goal " << _adaptive_feed_goal_percent << "% clamped to "
+                         << effective_goal << "% -- unreachable at " << int(_last_rpm) << " rpm");
+            }
+
+            float error    = _last_torque_percent - effective_goal;
             float deadband = float(_adaptive_feed_deadband_percent);
             // Tier 3 seeks using its own float accumulator so sub-1% per-poll
             // steps are not truncated away. But reconcile it safely with the
