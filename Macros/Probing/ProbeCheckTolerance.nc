@@ -23,13 +23,19 @@
 (  be processed, so the alarm has actually taken hold before any further)
 (  line can run. Without it there is a window where the program continues.)
 ()
-(Messages use PRINT rather than MSG because PRINT interpolates parameter)
-(values, so the operator sees HOW FAR out it was, not just that it failed.)
+(Results are reported with PRINT rather than a plain message, because)
+(PRINT interpolates parameter values -- the operator sees HOW FAR out it)
+(was, not merely that it failed.)
+()
+(Note: the comment handler does strstr for the three letters M-S-G and)
+(hijacks ANY comment containing them, printing from character 4 onward.)
+(So no comment here may contain that sequence unless it is meant to be a)
+(message. That is why this paragraph avoids spelling it out.)
 
 (--- SIZE: is the feature the size it should be? ---)
 o340 if [#<_probe_tol_size> GT 0]
     o341 if [ABS[#<_probe_dev_size>] GT #<_probe_tol_size>]
-        (PRINT, PROBE OUT OF TOLERANCE - size error %.4f#<_probe_dev_size> mm exceeds limit %.4f#<_probe_tol_size> mm)
+        (PRINT, PROBE OUT OF TOLERANCE - size error %.4f#<_probe_dev_size>  mm exceeds limit %.4f#<_probe_tol_size>  mm)
         o342 if [#<_probe_action_size> GT 0]
             $Alarm/Send=3
             G4 P0.1
@@ -40,7 +46,7 @@ o340 endif
 (--- POSITION: is the feature where it should be? ---)
 o350 if [#<_probe_tol_pos> GT 0]
     o351 if [#<_probe_dev_pos> GT #<_probe_tol_pos>]
-        (PRINT, PROBE OUT OF POSITION - found %.4f#<_probe_dev_pos> mm from nominal, limit %.4f#<_probe_tol_pos> mm)
+        (PRINT, PROBE OUT OF POSITION - found %.4f#<_probe_dev_pos>  mm from nominal, limit %.4f#<_probe_tol_pos>  mm)
         o352 if [#<_probe_action_pos> GT 0]
             $Alarm/Send=3
             G4 P0.1

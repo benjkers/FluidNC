@@ -51,11 +51,21 @@ o503 endif
 
 #<_ps_reach>=[#<_probe_clearance> + #<_probe_overtravel>]
 
+(Precomputed step vectors. FluidNC executes a gcode line in a 128 byte)
+(buffer, so anything over 127 characters is rejected with "line too long")
+(-- these keep the motion lines short.)
+#<_ps_fx>=[#<_ps_ux> * #<_ps_reach>]
+#<_ps_fy>=[#<_ps_uy> * #<_ps_reach>]
+#<_ps_fz>=[#<_ps_uz> * #<_ps_reach>]
+#<_ps_bx>=[#<_ps_ux> * #<_probe_backoff>]
+#<_ps_by>=[#<_ps_uy> * #<_probe_backoff>]
+#<_ps_bz>=[#<_ps_uz> * #<_probe_backoff>]
+
 (--- fast find, back off, first accurate touch ---)
 G91
-G38.2 X[#<_ps_ux> * #<_ps_reach>] Y[#<_ps_uy> * #<_ps_reach>] Z[#<_ps_uz> * #<_ps_reach>] F#<_probe_feed_fast>
-G0 X[0 - [#<_ps_ux> * #<_probe_backoff>]] Y[0 - [#<_ps_uy> * #<_probe_backoff>]] Z[0 - [#<_ps_uz> * #<_probe_backoff>]]
-G38.2 X[#<_ps_ux> * [#<_probe_backoff> * 2]] Y[#<_ps_uy> * [#<_probe_backoff> * 2]] Z[#<_ps_uz> * [#<_probe_backoff> * 2]] F#<_probe_feed_slow>
+G38.2 X#<_ps_fx> Y#<_ps_fy> Z#<_ps_fz> F#<_probe_feed_fast>
+G0 X[0 - #<_ps_bx>] Y[0 - #<_ps_by>] Z[0 - #<_ps_bz>]
+G38.2 X[#<_ps_bx> * 2] Y[#<_ps_by> * 2] Z[#<_ps_bz> * 2] F#<_probe_feed_slow>
 G90
 #<_ps_p1x>=#5061
 #<_ps_p1y>=#5062
@@ -63,15 +73,21 @@ G90
 
 o510 if [#<_ps_rotate> GT 0]
     (--- retract clear, let the operator turn the spindle half a turn ---)
+    (Back off only far enough to release the stylus, not the whole)
+    (approach distance. It must clear the trigger deflection -- microns --)
+    (but stay well inside the approach, because the second touch runs at)
+    (the slow measuring feed and any extra retract is crawled back at that)
+    (speed. Rotating the spindle sweeps the tip through a circle the size)
+    (of the runout, so a backoff is ample room to turn it.)
     G91
-    G0 X[0 - [#<_ps_ux> * #<_probe_clearance>]] Y[0 - [#<_ps_uy> * #<_probe_clearance>]] Z[0 - [#<_ps_uz> * #<_probe_clearance>]]
+    G0 X[0 - #<_ps_bx>] Y[0 - #<_ps_by>] Z[0 - #<_ps_bz>]
     G90
     M0
     (MSG: Rotate the spindle 180 degrees by hand, then resume - roughly is fine)
 
     (--- second accurate touch, eccentricity now reversed ---)
     G91
-    G38.2 X[#<_ps_ux> * #<_ps_reach>] Y[#<_ps_uy> * #<_ps_reach>] Z[#<_ps_uz> * #<_ps_reach>] F#<_probe_feed_slow>
+    G38.2 X[#<_ps_bx> * 2] Y[#<_ps_by> * 2] Z[#<_ps_bz> * 2] F#<_probe_feed_slow>
     G90
     #<_ps_p2x>=#5061
     #<_ps_p2y>=#5062
@@ -82,13 +98,25 @@ o510 if [#<_ps_rotate> GT 0]
     #<_ps_z>=[[#<_ps_p1z> + #<_ps_p2z>] / 2]
 
     (--- how much runout we just cancelled, worth watching ---)
-    #<_probe_runout>=[SQRT[[[#<_ps_p2x> - #<_ps_p1x>] * [#<_ps_p2x> - #<_ps_p1x>]] + [[#<_ps_p2y> - #<_ps_p1y>] * [#<_ps_p2y> - #<_ps_p1y>]]] / 2]
+    #<_ps_dx>=[#<_ps_p2x> - #<_ps_p1x>]
+    #<_ps_dy>=[#<_ps_p2y> - #<_ps_p1y>]
+    #<_probe_runout>=[SQRT[[#<_ps_dx> * #<_ps_dx>] + [#<_ps_dy> * #<_ps_dy>]] / 2]
 o510 else
     #<_ps_x>=#<_ps_p1x>
     #<_ps_y>=#<_ps_p1y>
     #<_ps_z>=#<_ps_p1z>
     #<_probe_runout>=0
 o510 endif
+
+(--- RELEASE the probe before any further probe move ---)
+(The accurate touch above leaves the stylus deflected, and FluidNC rejects)
+(a G38 that begins with the probe already tripped -- mc_probe_cycle checks)
+(config->_probe->tripped and raises ProbeFailInitial. That applies to)
+(G38.3 too, so the protected return below would alarm every single time.)
+(A plain G0 backs off far enough to release it first.)
+G91
+G0 X[0 - #<_ps_bx>] Y[0 - #<_ps_by>] Z[0 - #<_ps_bz>]
+G90
 
 (--- hand the probe back where the caller left it ---)
 G53 G38.3 X#<_ps_sx> Y#<_ps_sy> Z#<_ps_sz> F#<_probe_feed_link>

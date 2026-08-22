@@ -122,36 +122,20 @@ properties = {
     value      : true,
     scope      : "post"
   },
+  outputToolGaugeVariable: {
+    title      : "Output tool gauge variable",
+    description: "'Yes' writes #<_fusion_tool_gauge> before each tool change. The ATC uses it as a hint for a faster toolsetter approach on manual tools, and the tool length check compares against it. 'No' omits it entirely, in which case the ATC falls back to a full-range approach and the length check is skipped.",
+    group      : "preferences",
+    type       : "boolean",
+    value      : true,
+    scope      : "post"
+  },
   probeDumpCycleProps: {
     title      : "Probe: dump cycle properties",
     description: "Diagnostic only. Writes every property Fusion exposes on a probing cycle into the output as comments, so the real property names and values can be read off. Leave off for normal use.",
     group      : "preferences",
     type       : "boolean",
     value      : false,
-    scope      : "post"
-  },
-  probePartialAngle1: {
-    title      : "Partial hole: probe angle 1",
-    description: "Direction of the first touch for partial circular hole probing, in degrees CCW from +X. All three angles must lie inside the arc the probe can actually reach, or the stylus will be driven into material.",
-    group      : "preferences",
-    type       : "number",
-    value      : 210,
-    scope      : "post"
-  },
-  probePartialAngle2: {
-    title      : "Partial hole: probe angle 2",
-    description: "Direction of the second touch for partial circular hole probing, degrees CCW from +X. Spread the three angles as widely as the reachable arc allows -- points close together make the circle solution very sensitive to probe noise.",
-    group      : "preferences",
-    type       : "number",
-    value      : 270,
-    scope      : "post"
-  },
-  probePartialAngle3: {
-    title      : "Partial hole: probe angle 3",
-    description: "Direction of the third touch for partial circular hole probing, degrees CCW from +X. The three angles must not be collinear-ish; the macro alarms if they are.",
-    group      : "preferences",
-    type       : "number",
-    value      : 330,
     scope      : "post"
   }
 };
@@ -496,7 +480,19 @@ function writeProbeParams(extra) {
   // only as the FALLBACK for #<_probe_yaw> -- the calibrated effective
   // X/Y probe radius -- so probing still works before yaw is calibrated.
   writeBlock("#<_probe_tool_radius>=" + xyzFormat.format(tool.diameter / 2));
-  writeBlock("#<_probe_safe_z>=" + xyzFormat.format((extra && extra.safeZ) ? extra.safeZ : 0));
+  // ABSOLUTE heights straight from Fusion, in the driving offset.
+  // Retract Height is referenced to stock top, so it genuinely clears the
+  // part. This replaced a RELATIVE lift, which only cleared a feature that
+  // happened to be shorter than the lift -- on a tall boss it left the
+  // stylus buried in material.
+  writeBlock("#<_probe_retract_z>=" + xyzFormat.format(cycle.retract !== undefined ? cycle.retract : 0));
+  writeBlock("#<_probe_depth_z>=" + xyzFormat.format(probedSurfaceZ(0)));
+  writeBlock("#<_probe_lift>=" + ((extra && extra.lift) ? 1 : 0));
+  // Fusion's "Print Results" checkbox. When set, each macro echoes the
+  // measured centre, size and deviations to the console via PRINT, which
+  // interpolates the parameter values -- so the operator sees the actual
+  // numbers rather than only a pass or fail.
+  writeBlock("#<_probe_print>=" + (cycle.printResults ? 1 : 0));
   // Fusion's inspection tolerances. 0 disables a check. Actions map to
   // 0 = warn only, 1 = alarm and stop the program.
   // WHICH offset the result is written to. Fusion's WCS probing lets you
@@ -566,16 +562,16 @@ function probedSurfaceZ(z) {
 // F50 from the previous macro and crawl. Resetting forces it out every
 // time, which costs one word and removes the whole class of problem.
 function protectedMove(words) {
-  // Drop any axis word the modal formatter suppressed. If NOTHING is left
-  // the probe is already where we want it, and emitting a bare "G38.3 F..."
-  // with no axis word is a gcode error -- so skip the block entirely.
-  var out = [];
+  // Drop any axis word the modal formatter suppressed. If nothing is left
+  // the probe is already where we want it, and a bare "G38.3 F..." with no
+  // axis word is a gcode error -- so skip the block entirely.
+  var parts = [];
   for (var i = 0; i < words.length; ++i) {
     if (words[i]) {
-      out.push(words[i]);
+      parts.push(words[i]);
     }
   }
-  if (out.length == 0) {
+  if (parts.length == 0) {
     return;
   }
   // feedOutput is modal, but the macros set their own feeds internally
@@ -583,9 +579,11 @@ function protectedMove(words) {
   // would suppress F on the next operation and the move would inherit the
   // leftover F50 and crawl. Reset forces it out every time.
   feedOutput.reset();
-  out.unshift("G38.3");
-  out.push(feedOutput.format(probeFeedLink ? probeFeedLink : cycle.feedrate));
-  writeBlock.apply(null, out);
+  var feed = feedOutput.format(probeFeedLink ? probeFeedLink : cycle.feedrate);
+  // Built as ONE pre-joined string rather than writeBlock.apply(): the post
+  // engine provides writeBlock as a host function and .apply() on it is not
+  // reliably supported, which stops the post loading at all.
+  writeBlock("G38.3 " + parts.join(" ") + " " + feed);
 }
 
 function safeMoveZ(targetZ) {
@@ -634,15 +632,38 @@ function standoffFor() {
 // For corner cycles Fusion gives the CORNER, so that caller subtracts the
 // standoff itself before calling. Either way this function receives an
 // approach point and recovers the surface the same way.
+// Bring the probe to its starting height for a cycle.
+//
+// When the macro will LIFT between touches -- an external feature, or an
+// internal one with an island -- it descends beside each face itself, and
+// the feature centre is NOT safe to descend at: on a boss it is solid
+// material, on an island it is the island. Fusion parks the probe at the
+// centre, so descending to probing depth here drove the stylus straight
+// into the top of the part. Stop at the retract height and let the macro
+// place itself.
+//
+// Without a lift the macro works at depth throughout, and the centre of a
+// plain bore or channel is open, so descending is both safe and required.
+function moveToCycleStart(z, willLift) {
+  if (willLift) {
+    safeMoveZ(cycle.retract !== undefined ? cycle.retract : probedSurfaceZ(z));
+  } else {
+    safeMoveZ(probedSurfaceZ(z));
+  }
+}
+
 function probeAxisEdge(axis, dir, ax, ay, z) {
   var so = standoffFor();
   var surfaceX = (axis == "X") ? (ax + dir * so) : ax;
   var surfaceY = (axis == "Y") ? (ay + dir * so) : ay;
   writeProbeParams({nomX: surfaceX, nomY: surfaceY});
+  // Position in XY FIRST, while still high, and only then descend. The
+  // corner cycles offset the approach point from the corner, so traversing
+  // at probing depth could drag the stylus through the part.
+  protectedMove([xOutput.format(ax), yOutput.format(ay)]);
   if (z !== undefined) {
     safeMoveZ(probedSurfaceZ(z));
   }
-  protectedMove([xOutput.format(ax), yOutput.format(ay)]);
   writeBlock("#<_probe_axis_dir>=" + dir);
   runProbeMacro("Probe" + axis + "Edge.nc");
 }
@@ -665,24 +686,15 @@ function probeZSurface(nz, z) {
   runProbeMacro("ProbeZSurface.nc");
 }
 
-// Lift needed to clear a boss, or to hop over an island while crossing a
-// pocket. Fusion gives no single dedicated value, so use the retract/
-// clearance the operation already defines, falling back to the standoff.
-function islandLift() {
-  if (cycle.probeClearance !== undefined && cycle.probeClearance > 0) {
-    return cycle.probeClearance + tool.diameter / 2;
-  }
-  return tool.diameter;
-}
 
 function probeChannel(axis, width, withIsland, nx, ny, z) {
   writeProbeParams({
     widthX: (axis == "X") ? width : undefined,
     widthY: (axis == "Y") ? width : undefined,
-    safeZ:  withIsland ? islandLift() : 0,
+    lift: withIsland,
     nomX: nx, nomY: ny
   });
-  safeMoveZ(probedSurfaceZ(z));
+  moveToCycleStart(z, withIsland);
   runProbeMacro("Probe" + axis + "Channel.nc");
 }
 
@@ -692,10 +704,10 @@ function probeWall(axis, width, nx, ny, z) {
   writeProbeParams({
     widthX: (axis == "X") ? width : undefined,
     widthY: (axis == "Y") ? width : undefined,
-    safeZ:  islandLift(),
+    lift: true,
     nomX: nx, nomY: ny
   });
-  safeMoveZ(probedSurfaceZ(z));
+  moveToCycleStart(z, true);
   runProbeMacro("Probe" + axis + "Wall.nc");
 }
 
@@ -703,28 +715,61 @@ function probeInnerXY(widthX, widthY, withIsland, nx, ny, z) {
   writeProbeParams({
     widthX: widthX,
     widthY: widthY,
-    safeZ:  withIsland ? islandLift() : 0,
+    lift: withIsland,
     nomX: nx, nomY: ny
   });
-  safeMoveZ(probedSurfaceZ(z));
+  moveToCycleStart(z, withIsland);
   runProbeMacro("ProbeInnerXY.nc");
 }
 
-function probePartialHole(dia, withIsland, nx, ny, z) {
-  writeProbeParams({widthX: dia, widthY: dia, safeZ: withIsland ? islandLift() : 0, nomX: nx, nomY: ny});
+// The three touch angles come from FUSION. Autodesk's partial-circle
+// cycles carry them as partialCircleAngleA/B/C -- the same three angles
+// Renishaw's 9823 macro takes -- and they map directly onto the three
+// points the macro solves the circle through.
+//
+// There is deliberately NO fallback. Only Fusion knows which part of the
+// arc is reachable, so substituting a default here would drive the stylus
+// at whatever the post happened to be set to rather than along the arc the
+// operation planned. Failing to post is the safe outcome.
+function writePartialAngles() {
+  var a = cycle.partialCircleAngleA;
+  var b = cycle.partialCircleAngleB;
+  var c = cycle.partialCircleAngleC;
+  if (a === undefined || b === undefined || c === undefined) {
+    error(localize("This partial-circle operation did not supply the three probe "
+      + "angles (partialCircleAngleA/B/C). Without them the probe path cannot be "
+      + "generated safely."));
+    return;
+  }
+  writeBlock("#<_probe_angle_1>=" + xyzFormat.format(a));
+  writeBlock("#<_probe_angle_2>=" + xyzFormat.format(b));
+  writeBlock("#<_probe_angle_3>=" + xyzFormat.format(c));
+}
+
+// Partial BOSS. External, so the lift is mandatory -- the nominal centre is
+// solid material and cannot be traversed. Differs from the partial hole in
+// the sign of the radius correction as well as the motion.
+function probePartialBoss(dia, nx, ny, z) {
+  writeProbeParams({widthX: dia, widthY: dia, lift: true, nomX: nx, nomY: ny});
   writeBlock("#<_probe_diameter>=" + xyzFormat.format(dia));
-  writeBlock("#<_probe_angle_1>=" + xyzFormat.format(getProperty("probePartialAngle1")));
-  writeBlock("#<_probe_angle_2>=" + xyzFormat.format(getProperty("probePartialAngle2")));
-  writeBlock("#<_probe_angle_3>=" + xyzFormat.format(getProperty("probePartialAngle3")));
-  safeMoveZ(probedSurfaceZ(z));
+  writePartialAngles();
+  moveToCycleStart(z, true);
+  runProbeMacro("ProbePartialBoss.nc");
+}
+
+function probePartialHole(dia, withIsland, nx, ny, z) {
+  writeProbeParams({widthX: dia, widthY: dia, lift: withIsland, nomX: nx, nomY: ny});
+  writeBlock("#<_probe_diameter>=" + xyzFormat.format(dia));
+  writePartialAngles();
+  moveToCycleStart(z, withIsland);
   runProbeMacro("ProbePartialHole.nc");
 }
 
 function probeOuterXY(widthX, widthY, nx, ny, z) {
   // A boss ALWAYS needs a lift -- the probe has to get out past each face
   // and back down beside it without dragging over the top.
-  writeProbeParams({widthX: widthX, widthY: widthY, safeZ: islandLift(), nomX: nx, nomY: ny});
-  safeMoveZ(probedSurfaceZ(z));
+  writeProbeParams({widthX: widthX, widthY: widthY, lift: true, nomX: nx, nomY: ny});
+  moveToCycleStart(z, true);
   runProbeMacro("ProbeOuterXY.nc");
 }
 
@@ -734,9 +779,16 @@ function onCyclePoint(x, y, z) {
     return;
   }
 
-  var dia = cycle.diameter;
+  // Circular features carry their size in width1, NOT in a "diameter"
+  // property -- confirmed from a cycle-property dump, where cycle.diameter
+  // does not exist on any cycle. Reading it gave undefined and the format
+  // call then failed with "Value is not a number".
+  var dia = (cycle.diameter !== undefined) ? cycle.diameter : cycle.width1;
+  // width1 is the primary size; width2 only exists on rectangular features.
+  // Single-axis cycles (channel, wall) carry their one dimension in width1
+  // regardless of axis, so fall back to it rather than emitting undefined.
   var wx  = cycle.width1;
-  var wy  = cycle.width2;
+  var wy  = (cycle.width2 !== undefined) ? cycle.width2 : cycle.width1;
 
   switch (cycleType) {
   // ---- single axis ------------------------------------------------
@@ -853,12 +905,13 @@ function onCyclePoint(x, y, z) {
     probePartialHole(dia, cycleType.indexOf("island") >= 0, x, y, z);
     break;
 
-  // A partial BOSS would need the probe to approach each touch from
-  // outside the arc and drop beside it, which needs approach geometry
-  // Fusion does not expose here. Refused rather than guessed at.
+  // Partial BOSS: three touches on the reachable arc, probing INWARD from
+  // outside. The tip radius is SUBTRACTED rather than added when recovering
+  // the diameter, and the probe must lift over the boss between touches
+  // because its centre is solid material.
   case "probing-xy-circular-partial-boss":
-    error(localize("Partial circular BOSS probing is not supported by this post. "
-                 + "Use a full circular boss probe, or probe two single axes."));
+    writeComment("Probing partial circular boss (3 point)");
+    probePartialBoss(dia, x, y, z);
     break;
 
   // Angle / coordinate-rotation cycles are intentionally out of scope.
@@ -986,7 +1039,9 @@ function onCommand(command) {
     // doesn't have a comparable "expected" gauge length from Fusion in the
     // same sense as a real cutting tool, so it's excluded here.
     if (tool.number != 100) {
-      writeBlock("#<_fusion_tool_gauge>=" + xyzFormat.format(getBodyLength(tool)));
+      if (getProperty("outputToolGaugeVariable")) {
+        writeBlock("#<_fusion_tool_gauge>=" + xyzFormat.format(getBodyLength(tool)));
+      }
     }
     if (getProperty("outputToolChange")) {
       writeToolBlock("T" + toolFormat.format(tool.number), mFormat.format(6));
