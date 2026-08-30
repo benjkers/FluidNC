@@ -161,6 +161,13 @@ namespace ATCs {
             return false;
         }
         if (tool_number == GAUGE_SETTER_TOOL) {
+            if (_ets_reference_probe_z_valid) {
+                float shift = v - _ets_reference_probe_z;
+                log_info("ATC:" << name() << " toolsetter reference was " << _ets_reference_probe_z << ", now " << v
+                                << ", shift " << shift << " mm");
+            } else {
+                log_info("ATC:" << name() << " toolsetter reference set for the first time");
+            }
             _ets_reference_probe_z       = v;
             _ets_reference_probe_z_valid = true;
             log_info("ATC:" << name() << " toolsetter reference set (raw Z=" << v << ", T" << int(GAUGE_SETTER_TOOL)

@@ -33,7 +33,7 @@
 (message. That is why this paragraph avoids spelling it out.)
 
 (--- SIZE: is the feature the size it should be? ---)
-o340 if [#<_probe_tol_size> GT 0]
+o2500 if [#<_probe_tol_size> GT 0]
     o341 if [ABS[#<_probe_dev_size>] GT #<_probe_tol_size>]
         (PRINT, PROBE OUT OF TOLERANCE - size error %.4f#<_probe_dev_size>  mm exceeds limit %.4f#<_probe_tol_size>  mm)
         o342 if [#<_probe_action_size> GT 0]
@@ -41,10 +41,10 @@ o340 if [#<_probe_tol_size> GT 0]
             G4 P0.1
         o342 endif
     o341 endif
-o340 endif
+o2500 endif
 
 (--- POSITION: is the feature where it should be? ---)
-o350 if [#<_probe_tol_pos> GT 0]
+o2501 if [#<_probe_tol_pos> GT 0]
     o351 if [#<_probe_dev_pos> GT #<_probe_tol_pos>]
         (PRINT, PROBE OUT OF POSITION - found %.4f#<_probe_dev_pos>  mm from nominal, limit %.4f#<_probe_tol_pos>  mm)
         o352 if [#<_probe_action_pos> GT 0]
@@ -52,4 +52,4 @@ o350 if [#<_probe_tol_pos> GT 0]
             G4 P0.1
         o352 endif
     o351 endif
-o350 endif
+o2501 endif

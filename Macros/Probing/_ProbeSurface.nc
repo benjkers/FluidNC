@@ -27,22 +27,22 @@
 
 $SD/Run=/Probing/ProbeInit.nc
 
-o500 if [EXISTS[#<_ps_ux>]]
-o500 else
+o2350 if [EXISTS[#<_ps_ux>]]
+o2350 else
 #<_ps_ux>=0
-o500 endif
-o501 if [EXISTS[#<_ps_uy>]]
-o501 else
+o2350 endif
+o2351 if [EXISTS[#<_ps_uy>]]
+o2351 else
 #<_ps_uy>=0
-o501 endif
-o502 if [EXISTS[#<_ps_uz>]]
-o502 else
+o2351 endif
+o2352 if [EXISTS[#<_ps_uz>]]
+o2352 else
 #<_ps_uz>=0
-o502 endif
-o503 if [EXISTS[#<_ps_rotate>]]
-o503 else
+o2352 endif
+o2353 if [EXISTS[#<_ps_rotate>]]
+o2353 else
 #<_ps_rotate>=1
-o503 endif
+o2353 endif
 
 (--- remember where we started so we can hand the probe back ---)
 #<_ps_sx>=#<_abs_x>
@@ -71,7 +71,7 @@ G90
 #<_ps_p1y>=#5062
 #<_ps_p1z>=#5063
 
-o510 if [#<_ps_rotate> GT 0]
+o2354 if [#<_ps_rotate> GT 0]
     (--- retract clear, let the operator turn the spindle half a turn ---)
     (Back off only far enough to release the stylus, not the whole)
     (approach distance. It must clear the trigger deflection -- microns --)
@@ -101,12 +101,12 @@ o510 if [#<_ps_rotate> GT 0]
     #<_ps_dx>=[#<_ps_p2x> - #<_ps_p1x>]
     #<_ps_dy>=[#<_ps_p2y> - #<_ps_p1y>]
     #<_probe_runout>=[SQRT[[#<_ps_dx> * #<_ps_dx>] + [#<_ps_dy> * #<_ps_dy>]] / 2]
-o510 else
+o2354 else
     #<_ps_x>=#<_ps_p1x>
     #<_ps_y>=#<_ps_p1y>
     #<_ps_z>=#<_ps_p1z>
     #<_probe_runout>=0
-o510 endif
+o2354 endif
 
 (--- RELEASE the probe before any further probe move ---)
 (The accurate touch above leaves the stylus deflected, and FluidNC rejects)

@@ -130,12 +130,20 @@ properties = {
     value      : true,
     scope      : "post"
   },
+  probeLogToSD: {
+    title      : "Log probe results to SD card",
+    description: "'Yes' appends every probing result to /probe_log.csv on the controller's SD card, for trending or record keeping. Independent of Print Results. Clear the file with $Probe/LogClear, view it with $Probe/LogShow.",
+    group      : "preferences",
+    type       : "boolean",
+    value      : true,
+    scope      : "post"
+  },
   probePauseAfterResults: {
     title      : "Pause after probe results",
     description: "'Yes' holds the program with a pause after each probing cycle prints its result, so the numbers can be read before machining continues. Only has an effect on operations with Print Results enabled.",
     group      : "preferences",
     type       : "boolean",
-    value      : true,
+    value      : false,
     scope      : "post"
   },
   probeDumpCycleProps: {
@@ -502,6 +510,26 @@ function writeProbeParams(extra) {
   // numbers rather than only a pass or fail.
   writeBlock("#<_probe_print>=" + (cycle.printResults ? 1 : 0));
   writeBlock("#<_probe_pause>=" + (getProperty("probePauseAfterResults") ? 1 : 0));
+  // Fusion's "Probe Geometry" operations are INSPECTION -- they measure a
+  // feature during the job and report it, and must not touch the work
+  // offset. Its WCS probing operations do the opposite. The two post
+  // through exactly the same cycles, so the only way to tell them apart is
+  // the section strategy: probe_geometry means measure only.
+  var measureOnly = (String(currentSection.strategy) == "probe_geometry");
+  writeBlock("#<_probe_set_origin>=" + (measureOnly ? 0 : 1));
+  writeBlock("#<_probe_log>=" + (getProperty("probeLogToSD") ? 1 : 0));
+  // A numeric program identifier for the log. Gcode parameters hold floats
+  // only, so the program NAME cannot survive the trip into the log writer --
+  // but Fusion's names are usually numeric ("1001"), so parsing one out of
+  // programName gets us something useful. typeof is used rather than a
+  // comparison because programName may be undeclared, not merely undefined,
+  // and comparing an undeclared identifier throws.
+  var progId = 0;
+  if (typeof programName != "undefined" && programName) {
+    var digits = String(programName).replace(/[^0-9]/g, "");
+    progId = digits.length ? parseInt(digits, 10) : 0;
+  }
+  writeBlock("#<_probe_prog_id>=" + progId);
   // Fusion's inspection tolerances. 0 disables a check. Actions map to
   // 0 = warn only, 1 = alarm and stop the program.
   // WHICH offset the result is written to. Fusion's WCS probing lets you

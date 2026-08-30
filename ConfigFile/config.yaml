@@ -25,7 +25,7 @@ axes:
       positive_direction: true
       mpos_mm: 0 
       feed_mm_per_min: 100.000
-      seek_mm_per_min: 400.000
+      seek_mm_per_min: 600
       settle_ms: 500
       seek_scaler: 1.100
       feed_scaler: 1.100
@@ -59,7 +59,7 @@ axes:
     motor0:
       limit_neg_pin: gpio.32:high:pd
       hard_limits: false
-      pulloff_mm: 5.000
+      pulloff_mm: 1
       standard_stepper:
         step_pin: I2SO.5
         direction_pin: I2SO.4:low

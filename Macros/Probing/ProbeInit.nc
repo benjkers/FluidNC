@@ -180,6 +180,27 @@ o2440 else
 #<_probe_pause>=0
 o2440 endif
 
+(1 = write the found feature into the work offset. 0 = MEASURE ONLY.)
+()
+(Fusion's Probe Geometry operations are inspection: they measure a feature)
+(during a job and report it, and must NOT move the work offset. Its WCS)
+(probing operations do the opposite. The post tells them apart by the)
+(section strategy and sets this accordingly.)
+()
+(Defaults to 1 so a macro run by hand behaves as it always has.)
+o2450 if [EXISTS[#<_probe_set_origin>]]
+o2450 else
+#<_probe_set_origin>=1
+o2450 endif
+
+(1 = also append the result to /probe_log.csv on the SD card. Driven by a)
+(post property. Independent of printing: a long unattended job may want)
+(the file without the console chatter, or the reverse.)
+o2460 if [EXISTS[#<_probe_log>]]
+o2460 else
+#<_probe_log>=0
+o2460 endif
+
 o2422 if [EXISTS[#<_probe_print>]]
 o2422 else
 #<_probe_print>=0

@@ -42,7 +42,30 @@ $SD/Run=/Probing/_ProbeSurface.nc
 (Parking the controlled point ON the surface would bury the ball by a full)
 (tip radius and snap the stylus, and any over-travel past the deflection)
 (limit of the probe would do the same.)
+o2708 if [#<_probe_set_origin> GT 0]
 G10 L20 P#<_probe_wcs> Y[#<_probe_nom_y> + [#<_abs_y> - #<_surface>]]
+o2708 else
+(MSG: measure only - work offset left untouched)
+o2708 endif
 (MSG: Y edge probed, WCS Y0 set)
+
+(--- echo the result if Fusion asked for it ---)
+o2100 if [#<_probe_print> GT 0]
+(PRINT, PROBE Y edge:)
+(PRINT,   Y surface %.4f#<_surface>  nominal %.4f#<_probe_nom_y> )
+(PRINT,   dev size %.4f#<_probe_dev_size>  pos %.4f#<_probe_dev_pos>  runout %.4f#<_probe_runout> )
+o2608 if [#<_probe_pause> GT 0]
+M0
+o2608 endif
+o2100 endif
+
+(--- hand the result to the SD log if it is enabled ---)
+(The generic column names let one C++ writer serve every cycle;)
+(each macro maps its own values onto them here.)
+#<_probe_log_kind>=3
+#<_probe_log_y>=#<_surface>
+o2802 if [#<_probe_log> GT 0]
+$Probe/Log
+o2802 endif
 
 $SD/Run=/Probing/ProbeCheckTolerance.nc

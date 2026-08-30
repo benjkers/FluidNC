@@ -83,6 +83,14 @@ namespace {
             case 9:  return "BOSS";
             case 10: return "PHOLE";
             case 11: return "PBOSS";
+            // Yaw calibration reuses the generic columns rather than earning
+            // its own writer: one row per opposite pair, then a summary.
+            //   YAWCAL  nom_size = ideal separation, meas_size = measured,
+            //           dev_size = that pair's pre-travel, meas_x = angle
+            //   YAWSUM  nom_size = min, meas_size = max,
+            //           dev_size = mean pre-travel, dev_pos = eccentricity
+            case 12: return "YAWCAL";
+            case 13: return "YAWSUM";
             default: return "?";
         }
     }
@@ -211,7 +219,14 @@ Error probe_log_clear(const char* value, AuthenticationLevel auth_level, Channel
         remove(bak.c_str());
         log_info("Probe log: cleared, including the rolled-over copy");
     } else {
-        log_info(had ? "Probe log: cleared" : "Probe log: nothing to clear");
+        // Not a ternary inside log_info(): the macro expands to "ss << x", and
+        // << binds tighter than ?:, so the whole thing parses as
+        // (ss << had) ? ... : ... and fails to compile.
+        if (had) {
+            log_info("Probe log: cleared");
+        } else {
+            log_info("Probe log: nothing to clear");
+        }
     }
     g_seq      = 0;
     g_seq_read = true;
@@ -241,3 +256,25 @@ Error probe_log_show(const char* value, AuthenticationLevel auth_level, Channel&
     return Error::Ok;
 }
 
+// ---------------------------------------------------------------------------
+// Registration, in make_user_commands() in ProcessSettings.cpp, beside the
+// existing $ATC/SaveGauge line and following the same form:
+//
+//     new UserCommand(NULL, "Probe/Log", probe_log_append, anyState);
+//     new UserCommand(NULL, "Probe/LogClear", probe_log_clear, anyState);
+//     new UserCommand(NULL, "Probe/LogShow", probe_log_show, anyState);
+//
+// with these beside the other externs near the top:
+//
+//     extern Error probe_log_append(const char*, AuthenticationLevel, Channel&);
+//     extern Error probe_log_clear(const char*, AuthenticationLevel, Channel&);
+//     extern Error probe_log_show(const char*, AuthenticationLevel, Channel&);
+//
+// NULL for the short alias, matching $ATC/SaveGauge -- these are only ever
+// typed or issued by name, so a two-letter code would just be another thing
+// to collide with ("PL" is already Parameters/List).
+//
+// anyState matters more than it looks. $Probe/Log is issued from inside a
+// RUNNING macro, so the machine is in Cycle, not Idle. $ATC/SaveGauge is
+// called the same way and uses anyState for exactly this reason.
+// ---------------------------------------------------------------------------
