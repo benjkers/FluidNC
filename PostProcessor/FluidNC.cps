@@ -130,6 +130,14 @@ properties = {
     value      : true,
     scope      : "post"
   },
+  probePauseAfterResults: {
+    title      : "Pause after probe results",
+    description: "'Yes' holds the program with a pause after each probing cycle prints its result, so the numbers can be read before machining continues. Only has an effect on operations with Print Results enabled.",
+    group      : "preferences",
+    type       : "boolean",
+    value      : true,
+    scope      : "post"
+  },
   probeDumpCycleProps: {
     title      : "Probe: dump cycle properties",
     description: "Diagnostic only. Writes every property Fusion exposes on a probing cycle into the output as comments, so the real property names and values can be read off. Leave off for normal use.",
@@ -487,12 +495,13 @@ function writeProbeParams(extra) {
   // stylus buried in material.
   writeBlock("#<_probe_retract_z>=" + xyzFormat.format(cycle.retract !== undefined ? cycle.retract : 0));
   writeBlock("#<_probe_depth_z>=" + xyzFormat.format(probedSurfaceZ(0)));
-  writeBlock("#<_probe_lift>=" + ((extra && extra.lift) ? 1 : 0));
+  writeBlock("#<_probe_lift>=" + ((extra && extra.lift) ? 1 : 0));
   // Fusion's "Print Results" checkbox. When set, each macro echoes the
   // measured centre, size and deviations to the console via PRINT, which
   // interpolates the parameter values -- so the operator sees the actual
   // numbers rather than only a pass or fail.
-  writeBlock("#<_probe_print>=" + (cycle.printResults ? 1 : 0));
+  writeBlock("#<_probe_print>=" + (cycle.printResults ? 1 : 0));
+  writeBlock("#<_probe_pause>=" + (getProperty("probePauseAfterResults") ? 1 : 0));
   // Fusion's inspection tolerances. 0 disables a check. Actions map to
   // 0 = warn only, 1 = alarm and stop the program.
   // WHICH offset the result is written to. Fusion's WCS probing lets you

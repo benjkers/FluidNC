@@ -167,6 +167,18 @@ void settings_restore(uint8_t restore_flag) {
 extern void make_settings();
 extern void make_user_commands();
 
+// Bridge commands whose implementations live outside this file.
+//
+// A macro runs asynchronously relative to the C++ that queued it, so code
+// which needs a value the macro has just measured cannot simply read it back
+// after _macro.run(). The macro instead stores the value in a global named
+// parameter and issues one of these commands, which reads it out and acts on
+// it. Both the ATC and the probe logger work this way.
+extern Error atc_save_gauge_command(const char* value, AuthenticationLevel auth_level, Channel& out);
+extern Error probe_log_append(const char* value, AuthenticationLevel auth_level, Channel& out);
+extern Error probe_log_clear(const char* value, AuthenticationLevel auth_level, Channel& out);
+extern Error probe_log_show(const char* value, AuthenticationLevel auth_level, Channel& out);
+
 void settings_init() {
     make_settings();
     make_file_commands();
@@ -1083,6 +1095,20 @@ void make_user_commands() {
 
     new AsyncUserCommand("J", "Jog", doJog, notIdleOrJog);
     new AsyncUserCommand("G", "GCode/Modes", report_gcode, anyState);
+
+    // ATC gauge persistence. Without this the command does not exist, so
+    // commit_measured_gauge() is never reached and a freshly probed gauge
+    // length is never stored -- neither in memory nor on the card. The direct
+    // save_gauge_table() calls elsewhere still write the file, which is why
+    // the omission looks harmless: tool changes work, but every M6 re-probes
+    // instead of using a stored length.
+    new UserCommand("ASG", "ATC/SaveGauge", atc_save_gauge_command, notIdleOrAlarm);
+
+    // Probe result logging to the SD card. "PL" is already taken by
+    // Parameters/List, hence the PB prefix.
+    new UserCommand("PBL", "Probe/Log", probe_log_append, notIdleOrAlarm);
+    new UserCommand("PBC", "Probe/LogClear", probe_log_clear, notIdleOrAlarm);
+    new UserCommand("PBS", "Probe/LogShow", probe_log_show, anyState);
 };
 
 // This is the handler for all forms of settings commands,

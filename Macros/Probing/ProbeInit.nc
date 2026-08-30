@@ -70,7 +70,7 @@ o2407 endif
 (always wins, because this only fills in what is still missing.)
 o2408 if [EXISTS[#<_probe_yaw>]]
 o2408 else
-#<_probe_yaw>=0.1027
+#<_probe_yaw>=0.000
 o2408 endif
 
 (Effective X/Y radius actually used by every macro below.)
@@ -172,6 +172,14 @@ o2421 endif
 (1 = echo the measured result to the console after each cycle. Driven by)
 (Fusion's "Print Results" checkbox. PRINT interpolates parameter values, so)
 (the operator sees the actual numbers rather than just a pass or fail.)
+(1 = hold with a pause after the result is printed, so it can be read)
+(before the program moves on. Only has an effect when printing is on --)
+(there is nothing to wait for otherwise.)
+o2440 if [EXISTS[#<_probe_pause>]]
+o2440 else
+#<_probe_pause>=0
+o2440 endif
+
 o2422 if [EXISTS[#<_probe_print>]]
 o2422 else
 #<_probe_print>=0

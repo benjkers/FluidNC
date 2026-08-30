@@ -42,10 +42,13 @@ G10 L20 P#<_probe_wcs> Z[#<_probe_nom_z> + [#<_abs_z> - #<_ps_z>]]
 (MSG: Z surface probed, WCS Z0 set)
 
 (--- echo the result if Fusion asked for it ---)
-o900 if [#<_probe_print> GT 0]
+o1900 if [#<_probe_print> GT 0]
 (PRINT, PROBE Z surface:)
 (PRINT,   Z found %.4f#<_ps_z>  nominal %.4f#<_probe_nom_z> )
 (PRINT,   dev size %.4f#<_probe_dev_size>  pos %.4f#<_probe_dev_pos>  runout %.4f#<_probe_runout> )
-o900 endif
+o2610 if [#<_probe_pause> GT 0]
+M0
+o2610 endif
+o1900 endif
 
 $SD/Run=/Probing/ProbeCheckTolerance.nc
