@@ -7,10 +7,13 @@
 #include <mutex>
 #include <condition_variable>
 
+#include <semaphore>
+
 struct QueueHandle {
-    std::mutex mutex;
+    std::mutex              mutex;
     std::condition_variable not_empty_cv;
     std::condition_variable not_full_cv;
+    std::binary_semaphore   sem { 0 };
 
     size_t numberItems = 16;
     size_t entrySize   = 1;
@@ -47,6 +50,14 @@ BaseType_t xQueueGenericSend(QueueHandle_t xQueue, const void* const pvItemToQue
 
 #define pdFALSE ((BaseType_t)0)
 #define pdTRUE ((BaseType_t)1)
+
+// Real FreeRTOS defines these in projdefs.h, which the emulation layer lacks.
+#ifndef pdPASS
+#    define pdPASS (pdTRUE)
+#endif
+#ifndef pdFAIL
+#    define pdFAIL (pdFALSE)
+#endif
 #define xQueueReceive(xQueue, pvBuffer, xTicksToWait) xQueueGenericReceive((xQueue), (pvBuffer), (xTicksToWait), pdFALSE)
 
 #define queueQUEUE_TYPE_BASE ((uint8_t)0U)
