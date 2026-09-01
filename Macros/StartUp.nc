@@ -5,4 +5,4 @@ M52p0
 #<_BOrignY>=-4.6
 #<_BOrignZ>=-219.717
 G10 L2 P6 X[#<_BOrignX>] Y[#<_BOrignY>] Z[#<_BOrignZ>]
-#<_probe_yaw>=0.1137
+#<_probe_yaw>=0.1104
