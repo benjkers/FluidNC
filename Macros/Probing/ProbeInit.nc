@@ -70,7 +70,7 @@ o2407 endif
 (always wins, because this only fills in what is still missing.)
 o2408 if [EXISTS[#<_probe_yaw>]]
 o2408 else
-#<_probe_yaw>=0.000
+#<_probe_yaw>=0.1137
 o2408 endif
 
 (Effective X/Y radius actually used by every macro below.)
