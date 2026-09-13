@@ -1,12 +1,17 @@
 // Copyright (c) 2014 Luc Lebosse. All rights reserved.
 // Use of this source code is governed by a GPLv3 license that can be found in the LICENSE file.
 
+#include "Platform.h"  // HOSTED
 #include "Machine/MachineConfig.h"
 #include "Serial.h"    // is_realtime_command()
 #include "Settings.h"  // settings_execute_line()
 #include "Error.h"     // ErrorException
 
 #include "WebUIServer.h"
+
+#if !HOSTED
+#    include "WifiScanAsync.h"  // beginAsyncWifiScan(), pollAsyncWifiScan()
+#endif
 
 #include "Driver/fluidnc_mdns.h"
 #include "NetSettings.h"
@@ -298,11 +303,6 @@ namespace WebUI {
         }
 
         _port = http_port->get();
-
-        // Allocate the WebClient background-task stack now, while the heap is
-        // nearly empty, rather than lazily on the first [ESP...] command during
-        // the WebUI load burst.
-        WebClients::init();
 
         //create instance
         _webserver    = new AsyncWebServer(_port);
@@ -732,13 +732,24 @@ namespace WebUI {
             request->send(503, "text/plain", "Try again when not moving\n");
             return;
         }
+#if !HOSTED
+        // A WiFi AP scan is slow; run it asynchronously so it does not stall
+        // the command task or trip the connection watchdog.  The response is
+        // sent later from poll() -> pollAsyncWifiScan().
+        if (request->method() == HTTP_GET && beginAsyncWifiScan(request, cmd)) {
+            return;
+        }
+#endif
         char line[256];
         strncpy(line, cmd, 255);
         AsyncWebServerResponse* response;
         if (request->method() == HTTP_GET) {
             WebClient* webClient = new WebClient();
             webClient->attachWS(silent);
-            webClient->executeCommandBackground(line);
+            webClient->deliverCommand(line);
+            // Registered like any other channel; the polling task picks up the
+            // queued command line and runs it through execute_line().
+            allChannels.registration(webClient);
             response = request->beginChunkedResponse("", [webClient, request](uint8_t* buffer, size_t maxLen, size_t total) mutable -> size_t {
                 // The method can change before the end... not good
                 //if(request->method() != HTTP_GET)
@@ -751,9 +762,10 @@ namespace WebUI {
             // We rely on AsyncWebServer to take care of that
             request->onDisconnect([webClient]() {
                 webClient->detachWS();
-                allChannels.kill(webClient);
-                // Should not delete, kill() takes care of that
-                //delete webClient;
+                // Should not delete here, kill() takes care of that once no refs remain
+                if (!allChannels.kill(webClient)) {
+                    log_error("Could not queue HTTP command channel for deletion, leaking it");
+                }
             });
         } else
             response = request->beginResponse(200, "", "");
@@ -1459,6 +1471,9 @@ namespace WebUI {
 
     void WebUI_Server::poll() {
         static uint32_t start_time = millis();
+#if !HOSTED
+        pollAsyncWifiScan();
+#endif
 #ifdef HAVE_DNS
         if (WiFi.getMode() == WIFI_AP) {
             dnsServer.processNextRequest();
@@ -1474,6 +1489,10 @@ namespace WebUI {
             if (_socket_server) {
                 _socket_server->cleanupClients(WEBUI_MAX_WS_CLIENTS);
                 WSChannels::sendPing();
+                // Clean up channels whose socket died without a DISCONNECT event.
+                // Only silent-AND-disconnected channels are reaped, so the 60 s
+                // window is just debounce against a slow initial handshake.
+                WSChannels::reapStaleChannels(_socket_server, 60 * 1000);
             }
             start_time = millis();
         }

@@ -4,7 +4,6 @@
 #include "Settings.h"
 #include "Machine/MachineConfig.h"
 #include <sstream>
-#include <iomanip>
 #include <unistd.h>
 
 #include "Channel.h"         // Channel
@@ -156,7 +155,7 @@ namespace WebUI {
 
     public:
         NetConfig(const char* name) : Module(name) {}
-        void init() { new WebCommand(NULL, WEBCMD, WG, "ESP800", "Firmware/Info", showFwInfo, anyState); }
+        void init() { new WebReportCommand(NULL, WEBCMD, WG, "ESP800", "Firmware/Info", showFwInfo, anyState); }
         ~NetConfig() {}
     };
 
