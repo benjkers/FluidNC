@@ -6,6 +6,7 @@
 #include "../FluidPath.h"
 #include "../Parameters.h"
 #include "../Settings.h"
+#include "../Kinematics/TCPCartesian.h"  // tcp_is_active()
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -54,6 +55,19 @@ namespace ATCs {
     Custom_ATC* Custom_ATC::find(const std::string& name) {
         auto it = s_atc_instances.find(name);
         return it == s_atc_instances.end() ? nullptr : it->second;
+    }
+
+    void Custom_ATC::run_macro_restoring(bool tcp_was_on, bool spindle_was_on, bool was_inch_mode) {
+        if (spindle_was_on) {
+            _macro.addf("M3");
+        }
+        if (was_inch_mode) {
+            _macro.addf("G20");
+        }
+        if (tcp_was_on) {
+            _macro.addf("M128");
+        }
+                _macro.run(nullptr);
     }
 
     void Custom_ATC::init() {
@@ -191,6 +205,7 @@ namespace ATCs {
     // ------------------------------------------------------------------
     bool Custom_ATC::master_gauge_tool(tool_t tool_number, bool has_manual_value, float manual_value) {
         bool was_inch_mode = (gc_state.modal.units == Units::Inches);
+        const bool tcp_was_on = Kinematics::tcp_is_active();
 
         if (has_manual_value) {
             // Direct manual entry -- the only way to set T1's gauge length
@@ -245,6 +260,10 @@ namespace ATCs {
         protocol_buffer_synchronize();
         _macro.erase();
 
+                if (tcp_was_on) {
+            _macro.addf("M129");
+        }
+
         try {
             int   slot     = slot_index(tool_number);
             float approach = (_tool_gauge[slot] != 0.0f) ? _tool_gauge[slot] : _manual_gauge[0];
@@ -260,11 +279,7 @@ namespace ATCs {
             request_save_gauge(tool_number);
             move_to_safe_z();
 
-            if (was_inch_mode) {
-                _macro.addf("G20");
-            }
-
-            _macro.run(nullptr);
+            run_macro_restoring(tcp_was_on, false, was_inch_mode);
             return true;
         } catch (...) {
             log_info("Exception caught");
@@ -288,6 +303,15 @@ namespace ATCs {
 
         protocol_buffer_synchronize();  // wait for all motion to complete
         _macro.erase();                 // clear previous gcode
+
+        // Drop TCP for the whole sequence. The toolsetter maths reads #5063
+        // one line AFTER its G53 probe block, by which point the transform is
+        // restored and the number is part-frame. Also keeps the operator
+        // jogging in machine coordinates during any M0 pause.
+        const bool tcp_was_on = Kinematics::tcp_is_active();
+        if (tcp_was_on) {
+            _macro.addf("M129");
+        }                
 
         // Storing Gcode parameters to be used in break detection code, and
         // by Macros/ProbeZSetZero.nc / Macros/SetZZero.nc
@@ -334,7 +358,7 @@ namespace ATCs {
             }
 
             save_gauge_table();     // persist _prev_tool for power-loss recovery
-            _macro.run(nullptr);
+            run_macro_restoring(tcp_was_on, spindle_was_on, was_inch_mode);
             return true;
         }
 
@@ -349,7 +373,7 @@ namespace ATCs {
             move_over_toolsetter();
             reset();
             save_gauge_table();
-            _macro.run(nullptr);
+            run_macro_restoring(tcp_was_on, spindle_was_on, was_inch_mode);
             return true;
         }
 
@@ -390,7 +414,7 @@ namespace ATCs {
                 }
             }
             _macro.addf("o160 endif");
-            _macro.run(nullptr);
+            run_macro_restoring(tcp_was_on, spindle_was_on, was_inch_mode);
             return true;
         }
 
@@ -439,10 +463,7 @@ namespace ATCs {
                 move_to_safe_z();
                 _prev_tool = new_tool;
                 save_gauge_table();
-                if (was_inch_mode) {
-                    _macro.addf("G20");
-                }
-                _macro.run(nullptr);
+                run_macro_restoring(tcp_was_on, spindle_was_on, was_inch_mode);
                 return true;
             }
 
@@ -489,10 +510,7 @@ namespace ATCs {
                     if (spindle_was_on) {
                         _macro.addf("M3");
                     }
-                    if (was_inch_mode) {
-                        _macro.addf("G20");
-                    }
-                    _macro.run(nullptr);
+                    run_macro_restoring(tcp_was_on, spindle_was_on, was_inch_mode);
                     return true;
                 }
                 
@@ -544,14 +562,7 @@ namespace ATCs {
                 _prev_tool = new_tool;
                 move_to_safe_z();
                 save_gauge_table();
-
-                if (spindle_was_on) {
-                    _macro.addf("M3");
-                }
-                if (was_inch_mode) {
-                    _macro.addf("G20");
-                }
-                _macro.run(nullptr);
+                run_macro_restoring(tcp_was_on, spindle_was_on, was_inch_mode);
                 return true;
             }
 
@@ -582,14 +593,7 @@ namespace ATCs {
             _prev_tool = new_tool;
             move_to_safe_z();
             save_gauge_table();
-
-            if (spindle_was_on) {
-                _macro.addf("M3");
-            }
-            if (was_inch_mode) {
-                _macro.addf("G20");
-            }
-            _macro.run(nullptr);
+            run_macro_restoring(tcp_was_on, spindle_was_on, was_inch_mode);
             return true;
         } catch (...) { log_info("Exception caught"); }
 

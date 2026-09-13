@@ -207,6 +207,13 @@ enum class MasterGauge : bool {
     Disable = 0,
     Enable  = 1,
 };
+// M128 / M129 - enable / cancel rotary tool centre point compensation (RPCP).
+// Part of the M100-M199 "user defined" range (Modal Group MM10). Genuinely
+// modal, unlike M101: gc_state.modal.tcp is written back on change.
+enum class TcpControl : bool {
+    Disable = 0,
+    Enable  = 1,
+};
 // M52 Pn - LinuxCNC-style adaptive feed control enable/disable. Shares
 // Modal Group MM9 ("Override control") with M56, per the NIST RS274NGC
 // spec's own grouping of override-related M-codes.
@@ -293,6 +300,7 @@ struct gc_modal_t {
     ToolChange    tool_change;   // {M6}
     SetToolNumber set_tool_number;
     MasterGauge   master_gauge;  // {M101}
+    TcpControl    tcp;           // {M128, M129}
     AdaptiveFeed  adaptive_feed;  // {M52}
     IoControl     io_control;  // {M62, M63, M67}
     Override      override;    // {M56}

@@ -12,6 +12,25 @@ stepping:
   dir_delay_us: 1
   disable_delay_us: 1
 
+
+kinematics:
+  TCPCartesian:
+    pivot_x_mm: -236.6276      
+    pivot_y_mm: -140.0000
+    pivot_z_mm: -219.6375
+    axis_x:  0.001908
+    axis_y:  0.999998
+    axis_z: -0.000820
+    segment_length_mm: 1.0
+    segment_angle_deg: 0.8
+    max_segments: 20000
+    scale_feedrate: true
+    max_feed_scale: 10.0
+    rotate_tool_offset: false
+    check_soft_limits: true
+
+
+
 axes:
 
   x:

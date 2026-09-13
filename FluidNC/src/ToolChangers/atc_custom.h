@@ -230,6 +230,11 @@ namespace ATCs {
         void expose_current_tool_gauge(float gauge_length);
         void request_save_gauge(tool_t tool_number);  // emits the $ATC/SaveGauge=... bridge call
 
+            // Emits the modal restores this ATC is responsible for putting back,
+        // then runs the macro. Every successful exit from tool_change() and
+        // master_gauge_tool() goes through here.
+        void run_macro_restoring(bool tcp_was_on, bool spindle_was_on = false, bool was_inch_mode = false);
+
         // M101 Tn [Qvalue]. If has_manual_value, directly stores
         // manual_value as tool_number's gauge length (the only way to set
         // T1's, since it can't be auto-probed). Otherwise re-probes

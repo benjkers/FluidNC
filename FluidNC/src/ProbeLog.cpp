@@ -25,6 +25,8 @@
 #include "FluidPath.h"
 #include "Parameters.h"
 #include "Settings.h"
+#include "System.h"  // probe_steps, steps_to_motor_pos
+#include "GCode.h"   // gc_state.modal.tcp
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -35,14 +37,18 @@ namespace {
     const char* BAK_PATH = "/probe_log.bak";
 
     // Roll over at this size rather than growing without bound. One row is
-    // about 160 bytes, so this is a few thousand measurements -- enough to
+    // about 200 bytes, so this is a few thousand measurements -- enough to
     // cover a job comfortably while staying trivial to open in a spreadsheet.
     const long MAX_BYTES = 256L * 1024L;
 
+    // New columns go on the END. Every reader of this file keys on the header
+    // name rather than the column number, so appending leaves older logs and
+    // existing scripts working unchanged.
     const char* HEADER =
         "seq,uptime_s,program,feature,wcs,"
         "nom_x,nom_y,nom_z,meas_x,meas_y,meas_z,"
-        "nom_size,meas_size,dev_size,dev_pos,tol_size,tol_pos,result,runout\n";
+        "nom_size,meas_size,dev_size,dev_pos,tol_size,tol_pos,result,runout,"
+        "meas_a,meas_b,meas_c,tcp\n";
 
     // Sequence continues across a reboot by counting the rows already
     // present, which matters because the ESP32 has no clock to order by.
@@ -91,6 +97,15 @@ namespace {
             //           dev_size = mean pre-travel, dev_pos = eccentricity
             case 12: return "YAWCAL";
             case 13: return "YAWSUM";
+            // Machine geometry calibration. These do not measure a part
+            // feature, so they borrow the generic columns:
+            //   BAXIS   one rotary-axis point. nom_x = B angle,
+            //           nom_y = station number, nom_z = shank radius,
+            //           meas_size = flank separation
+            //   SQUARE  one point on a square's reference surface.
+            //           nom_x = plane, nom_y = face, nom_z = reversed flag
+            case 20: return "BAXIS";
+            case 21: return "SQUARE";
             default: return "?";
         }
     }
@@ -192,7 +207,27 @@ Error probe_log_append(const char* value, AuthenticationLevel auth_level, Channe
     write_num(f, "_probe_tol_pos");
 
     fprintf(f, "%s,", verdict());
-    fprintf(f, "%.4f\n", param_or("_probe_runout", 0.0f));
+    fprintf(f, "%.4f,", param_or("_probe_runout", 0.0f));
+
+    // Rotary position at the instant of the touch, read from the probe step
+    // counts rather than a parameter. That makes it raw MOTOR space, which
+    // never passes through the kinematics transform, so it is the true axis
+    // angle whether TCP was on or off. Blank for axes this machine lacks.
+    float motor_pos[MAX_N_AXIS];
+    steps_to_motor_pos(motor_pos, probe_steps);
+    for (axis_t axis = A_AXIS; axis <= C_AXIS; axis++) {
+        if (axis < Machine::Axes::_numberAxis) {
+            fprintf(f, "%.4f,", motor_pos[axis]);
+        } else {
+            fprintf(f, ",");
+        }
+    }
+
+    // Without this the measured columns are ambiguous. With TCP active the
+    // probe reports the PART frame; with it off, the machine frame. The
+    // macros read #5061-#5063 on their own lines, after any G53 block has
+    // ended, so the modal state is the frame those numbers are really in.
+    fprintf(f, "%d\n", gc_state.modal.tcp == TcpControl::Enable ? 1 : 0);
 
     fclose(f);
     log_info("Probe log: row " << g_seq << " " << feature_name(kind) << " " << verdict());
@@ -247,7 +282,9 @@ Error probe_log_show(const char* value, AuthenticationLevel auth_level, Channel&
         log_info("Probe log: no log file yet");
         return Error::Ok;
     }
-    char line[220];
+    // Four more columns than the original layout, so the old 220 no longer
+    // covers a full row -- fgets would split one line into two.
+    char line[320];
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\r\n")] = '\0';
         log_stream(out, line);

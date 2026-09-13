@@ -18,6 +18,7 @@
 #include "Job.h"                  // Job::active() and Job::channel()
 
 #include "Machine/MachineConfig.h"
+#include "Kinematics/TCPCartesian.h"  // M128/M129 TCP control
 #include "Parameters.h"
 #include "Flowcontrol.h"
 
@@ -56,6 +57,7 @@ gc_modal_t modal_defaults = {
     ToolChange::Disable,
     SetToolNumber::Disable,
     MasterGauge::Disable,
+    TcpControl::Disable,
     AdaptiveFeed::Disable,
     IoControl::None,
     Override::ParkingMotion
@@ -66,6 +68,11 @@ void gc_init() {
     // Reset parser state:
 
     memset(&gc_state, 0, sizeof(parser_state_t));
+
+    // A soft reset must also drop TCP, or the kinematics stays transformed
+    // while gc_state.modal.tcp has been zeroed back to Disable - the two
+    // would disagree and every subsequent position would be wrong.
+    Kinematics::tcp_set(false);
 
     // Load default G54 coordinate system.
     gc_state.modal          = modal_defaults;
@@ -235,6 +242,18 @@ void gc_ovr_changed() {
 void gc_wco_changed() {
     if (FORCE_BUFFER_SYNC_DURING_WCO_CHANGE) {
         protocol_buffer_synchronize();
+    }
+        // Under TCP the ROTARY work offset sets where the part's zero orientation
+    // is, so changing a work offset can rotate the whole part frame -- not
+    // just shift it. gc_state.position is expressed in that frame, so it has
+    // to be re-derived or the next move starts from a stale value and jumps.
+    //
+    // Every path that alters an offset ends up here: G10 L2/L20, G92, G92.1,
+    // a G54..G59 switch, and program end. One guard covers them all.
+    // Harmless on plain Cartesian, where no offset can rotate anything.
+    if (Kinematics::tcp_is_active()) {
+        protocol_buffer_synchronize();
+        gc_sync_position();
     }
     allChannels.notifyWco();
 }
@@ -757,6 +776,14 @@ Error gc_execute_line(const char* input_line) {
                         gc_block.modal.master_gauge = MasterGauge::Enable;
                         mg_word_bit                 = ModalGroup::MM10;
                         break;
+                    case 128:  // M128 - rotary tool centre point compensation ON
+                        gc_block.modal.tcp = TcpControl::Enable;
+                        mg_word_bit        = ModalGroup::MM10;
+                        break;
+                    case 129:  // M129 - rotary tool centre point compensation OFF
+                        gc_block.modal.tcp = TcpControl::Disable;
+                        mg_word_bit        = ModalGroup::MM10;
+                        break;
                     default:
                         return Error::GcodeUnsupportedCommand;  // [Unsupported M command]
                 }
@@ -1140,7 +1167,12 @@ Error gc_execute_line(const char* input_line) {
             clear_bitnum(value_words, GCodeWord::Q);
         }
     }
-
+    // [M128 Errors]: the kinematics must actually support TCP.
+    if (gc_block.modal.tcp != gc_state.modal.tcp && gc_block.modal.tcp == TcpControl::Enable) {
+        if (!Kinematics::tcp_supported()) {
+            return Error::GcodeUnsupportedCommand;  // [M128 without TCP kinematics]
+        }
+    }
     if (sawAdaptiveFeedWord) {  // M52 Pn -- P is required, read now that the whole line is parsed
         if (bitnum_is_false(value_words, GCodeWord::P)) {
             return Error::GcodeValueWordMissing;
@@ -1743,6 +1775,21 @@ Error gc_execute_line(const char* input_line) {
         gc_ovr_changed();
     }
 
+    if (gc_block.modal.tcp != gc_state.modal.tcp) {  // M128 / M129
+        // Blocks already in the planner were computed in the OLD frame, so
+        // they must finish before the transform changes underneath them.
+        protocol_buffer_synchronize();
+        gc_state.modal.tcp = gc_block.modal.tcp;
+        Kinematics::tcp_set(gc_state.modal.tcp == TcpControl::Enable);
+        // gc_state.position is expressed in the cartesian (part) frame. The
+        // same motor position means something different once the transform
+        // changes, so re-derive it or the next move starts from a lie and
+        // jumps. This is the single most important line in the M-code.
+        gc_sync_position();
+        gc_wco_changed();  // work position display depends on the frame
+        report_ovr_counter = 0;
+    }
+
     if (gc_block.modal.adaptive_feed != gc_state.modal.adaptive_feed) {  // M52 Pn
         gc_state.modal.adaptive_feed = gc_block.modal.adaptive_feed;
         bool enabled                 = gc_state.modal.adaptive_feed == AdaptiveFeed::Enable;
@@ -1903,6 +1950,16 @@ Error gc_execute_line(const char* input_line) {
         }
 
         coords[CoordIndex::TLO]->set(gc_state.tool_length_offset);
+        // Under TCP the part-frame coordinate carries the tool length offset
+        // through the rotation, so changing the offset moves the frame.
+        // gc_state.position would otherwise be stale by (I - R(B)) * dL --
+        // zero at B0, but 2*dL at B180 -- and that stale value fills in axis
+        // words the next block omits, and anchors G91 increments.
+        // Harmless on plain Cartesian, where the frame does not depend on TLO.
+        if (Kinematics::tcp_is_active()) {
+            protocol_buffer_synchronize();
+            gc_sync_position();
+        }
     }
     // [15. Coordinate system selection ]:
     if (gc_state.modal.coord_select != gc_block.modal.coord_select) {
@@ -1917,14 +1974,32 @@ Error gc_execute_line(const char* input_line) {
     // [18. Set retract mode ]: NOT SUPPORTED
     // [19. Go to predefined position, Set G10, or Set axis offsets ]:
     switch (gc_block.non_modal_command) {
-        case NonModal::SetCoordinateData:
+                case NonModal::SetCoordinateData: {
+            // A work offset under TCP is a FRAME, not just a translation: its
+            // rotary component fixes the part's zero ORIENTATION and its XYZ
+            // component fixes the origin AT that orientation. If the rotary
+            // component is changing here, rotate XYZ to match so the physical
+            // origin stays put. Nothing moves; without it the next move would
+            // drive to where the origin used to be.
+            float oldOffsets[MAX_N_AXIS];
+            coords[coord_select]->get(oldOffsets);
+            Kinematics::tcp_reorient_offset(oldOffsets, coord_data);
+
             coords[coord_select]->set(coord_data);
             gc_wco_changed();
             // Update system coordinate system if currently active.
             if (gc_state.modal.coord_select == coord_select) {
                 copyAxes(gc_state.coord_system, coord_data);
+                // The active frame just changed shape, so gc_state.position -
+                // which is expressed in it - has to be re-derived. The
+                // gc_wco_changed() above ran too early to do this.
+                if (Kinematics::tcp_is_active()) {
+                    protocol_buffer_synchronize();
+                    gc_sync_position();
+                }
             }
             break;
+        }
         case NonModal::GoHome0:
         case NonModal::GoHome1:
             // Move to intermediate position before going home. Obeys current coordinate system and offsets
@@ -1964,6 +2039,17 @@ Error gc_execute_line(const char* input_line) {
     if (gc_state.modal.motion != Motion::None) {
         if (axis_command == AxisCommand::MotionMode) {
             GCUpdatePos gc_update_pos = GCUpdatePos::Target;
+            // G53 means MACHINE coordinates, so the TCP transform is suspended
+            // for the duration of this one block - the same thing Fanuc does
+            // when a G53 appears with TCPC active. gc_block.values.xyz is
+            // already a raw machine target (the AbsoluteOverride branch above
+            // skips the WCS/TLO addition), so it must not be transformed.
+            const bool tcpOverride =
+                (gc_block.non_modal_command == NonModal::AbsoluteOverride) && Kinematics::tcp_is_active();
+            if (tcpOverride) {
+                protocol_buffer_synchronize();  // drain moves planned in the part frame
+                Kinematics::tcp_suspend(true);
+            }
             if (gc_state.modal.motion == Motion::Linear) {
                 mc_linear(gc_block.values.xyz, pl_data, gc_state.position);
             } else if (gc_state.modal.motion == Motion::Seek) {
@@ -1991,6 +2077,17 @@ Error gc_execute_line(const char* input_line) {
             // As far as the parser is concerned, the position is now == target. In reality the
             // motion control system might still be processing the action and the real tool position
             // in any intermediate location.
+            
+            if (tcpOverride) {
+                // Finish the machine-frame move, restore the transform, then
+                // re-derive position: gc_block.values.xyz is a MACHINE target
+                // and gc_state.position must go back to being part-frame.
+                protocol_buffer_synchronize();
+                Kinematics::tcp_suspend(false);
+                gc_sync_position();
+                gc_update_pos = GCUpdatePos::None;
+            }
+
             if (sys.abort()) {
                 return Error::Reset;
             }
