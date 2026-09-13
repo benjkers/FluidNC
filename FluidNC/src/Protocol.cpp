@@ -10,7 +10,8 @@
 #include "Protocol.h"
 #include "Event.h"
 
-#include <climits>  // UINT_MAX
+#include <climits>      // UINT_MAX
+#include <string_view>  // std::string_view (single-block line preview)
 
 #include "Machine/MachineConfig.h"
 #include "Machine/Homing.h"
@@ -23,6 +24,9 @@
 #include "Driver/restart.h"
 #include "Driver/watchdog.h"
 #include "Driver/heap.h"  // platform_max_free_block()
+
+#include <cstring>  // strncpy
+#include <memory>   // std::unique_ptr
 
 volatile ExecAlarm lastAlarm;  // The most recent alarm code
 
@@ -91,122 +95,317 @@ static void request_safety_door() {
     rtSafetyDoor = true;
 }
 
-TaskHandle_t outputTask = nullptr;
+TaskHandle_t outputTask  = nullptr;
+TaskHandle_t pollingTask = nullptr;
 
 QueueHandle_t message_queue;
 
+// Was 15 when a dedicated priority-2 task drained the queue preemptively.
+// Now the polling task drains it once per pass, so a command that logs a
+// burst before yielding needs room here or it self-throttles on
+// enqueue_log_message()'s retry (up to ~250 ms).  128 * 16 B = 2 KB.
+static constexpr UBaseType_t MESSAGE_QUEUE_DEPTH = 128;
+
+// Ship one queued log message to its channel.  Runs on the polling task
+// (drain_output() below) and, synchronously, from drain_messages().
+static void process_one_message(LogMessage& message) {
+    // print_msg() can throw - std::bad_alloc under heap exhaustion.  An
+    // exception escaping the polling task's try block still unwinds the whole
+    // pass; drop the message instead.  Own the queued string in a unique_ptr
+    // so it is freed on every path (throw included), and always release the
+    // ref so a closing channel can be reaped.
+    std::unique_ptr<std::string> owned(message.isString ? static_cast<std::string*>(message.line) : nullptr);
+    try {
+        if (!message.channel->is_closing()) {
+            const char* text = message.isString ? owned->c_str() : static_cast<const char*>(message.line);
+            message.channel->print_msg(message.level, text);
+        }
+    } catch (...) {}
+    message.channel->release_log_ref();
+}
+
+// Drain up to `max` queued log messages.  Non-blocking: the polling task
+// calls this once per pass instead of a dedicated output task blocking on
+// the queue.  Channel writes here are non-blocking too (WSChannel defers a
+// full send queue to its pollLine()), so a wedged client cannot stall the
+// polling loop.
+static void drain_output(int max) {
+    LogMessage message;
+    for (int i = 0; i < max && xQueueReceive(message_queue, &message, 0) == pdTRUE; ++i) {
+        process_one_message(message);
+        feed_watchdog();
+    }
+}
+
+// Flush all currently-queued messages.  From the polling task (the drainer)
+// this runs inline; from any other task it waits for the polling task to
+// drain, so channel writes stay on SUPPORT_TASK_CORE as before.
 void drain_messages() {
-    while (uxQueueMessagesWaiting(message_queue)) {
-        vTaskDelay(1);  // Let the output task finish sending data
-    }
-}
-
-void output_loop(void* unused) {
-    while (true) {
-        if (should_exit()) {
-            break;
-        }
-        // Block until a message is received
+    if (xTaskGetCurrentTaskHandle() == pollingTask) {
         LogMessage message;
-        if (xQueueReceive(message_queue, &message, 100)) {  // Use timeout to check exit flag
-            if (!message.channel->is_closing()) {
-                if (message.isString) {
-                    std::string* s = static_cast<std::string*>(message.line);
-                    message.channel->print_msg(message.level, s->c_str());
-                    delete s;
-                } else {
-                    const char* cp = static_cast<const char*>(message.line);
-                    message.channel->print_msg(message.level, cp);
-                }
-            } else if (message.isString) {
-                delete static_cast<std::string*>(message.line);
-            }
-            message.channel->release_log_ref();
+        while (xQueueReceive(message_queue, &message, 0) == pdTRUE) {
+            process_one_message(message);
+            feed_watchdog();
+        }
+    } else {
+        while (uxQueueMessagesWaiting(message_queue)) {
+            vTaskDelay(1);
         }
     }
 }
 
-Channel* activeChannel = nullptr;  // Channel associated with the input line
+// Make room in message_queue from the one task that would otherwise deadlock
+// waiting for it to drain: the polling task is the drainer, so if it fills the
+// queue itself (a burst of log_* before it reaches drain_output()), a blocking
+// xQueueSend would wait forever.  Ship one message inline and report success so
+// the caller can retry.  A no-op (returns false) on every other task.
+bool poll_task_drain_one_message() {
+    if (xTaskGetCurrentTaskHandle() != pollingTask) {
+        return false;
+    }
+    LogMessage message;
+    if (xQueueReceive(message_queue, &message, 0) != pdTRUE) {
+        return false;
+    }
+    process_one_message(message);
+    return true;
+}
 
-TaskHandle_t pollingTask = nullptr;
+// One line of input handed from the polling task (core 0, producer) to
+// protocol_main_loop (core 1, consumer).  The line is copied into the queue
+// item; xQueueSend/xQueueReceive supply the memory barrier that makes it safe
+// to read on the other core.  Depth 1 keeps the strict one-line-in-flight flow
+// control of the previous single-slot handoff.
+struct LineItem {
+    Channel* channel;  // source; holds a processing_ref until the line is acked
+    char     line[Channel::maxLine];
+};
+static constexpr UBaseType_t CMD_QUEUE_DEPTH = 1;
+QueueHandle_t                cmd_queue        = nullptr;
 
-char activeLine[Channel::maxLine];
+bool cmd_queue_defer(const char* line, Channel& channel) {
+    LineItem item;
+    item.channel = &channel;
+    strncpy(item.line, line, Channel::maxLine - 1);
+    item.line[Channel::maxLine - 1] = '\0';
+    return xQueueSend(cmd_queue, &item, 0) == pdTRUE;
+}
+
+// Poll the registered serial-style channels for one line and route it through
+// execute_line() on the polling task.  When no job runs this feeds cmd_queue;
+// during a job it services interloper commands (run inline or rejected in
+// execute_line, never queued), so they are not stuck behind a consumer that is
+// blocked in the planner.
+static void poll_input_channel() {
+    char buf[Channel::maxLine];
+    if (Channel* ch = pollChannels(buf)) {
+        Error rc = execute_line(buf, *ch, AuthenticationLevel::LEVEL_GUEST, false);
+        if (rc != Error::Deferred) {
+            // Ran inline or was rejected - the polling task still holds the ref.
+            ch->ack(rc);
+            ch->release_processing_ref();
+        }
+    }
+}
+
+const uint32_t heapWarnThreshold = 15000;
+
+uint32_t        heapLowWater           = UINT_MAX;
+static uint32_t heapLowWaterReported   = UINT_MAX;
+static uint32_t heapLowWaterReportTime = 0;
+
+// Low-water mark of the largest contiguous free block, i.e. the biggest single
+// allocation that would have succeeded.  Tracks fragmentation, which total-free
+// low-water misses.  Stays UINT_MAX on platforms where platform_max_free_block()
+// returns 0 (no API).
+uint32_t maxBlockLowWater = UINT_MAX;
+
+// Heap instrumentation.  Called from poll_once(), i.e. on SUPPORT_TASK_CORE,
+// so none of it lands on the motion core: xPortGetFreeHeapSize() is a cheap
+// counter read, but platform_max_free_block() walks the free list under the
+// global heap spinlock, and none of these numbers are time-critical.  The
+// low-water globals are written only here and read lock-free elsewhere ($heap,
+// WebUI, status reports); a 32-bit load/store is atomic on both cores and a
+// stale read only skews a diagnostic.
+static void heap_monitor_poll() {
+    // Total-free low-water: sampled every pass.  poll_once() runs at ~1 kHz
+    // (its leading vTaskDelay(1)), cheap enough for a counter read and quick
+    // enough to catch transient dips the throttled path below would miss.
+    uint32_t freeHeap = xPortGetFreeHeapSize();
+    if (freeHeap < heapLowWater) {
+        heapLowWater = freeHeap;
+    }
+
+    // Largest-free-block low-water and the low-memory warning: the block walk
+    // is the expensive part, so throttle to ~5 Hz.
+    static uint32_t lastSlowSample = 0;
+    if ((uint32_t)(getCpuTicks() - lastSlowSample) < (uint32_t)usToCpuTicks(200000)) {
+        return;
+    }
+    lastSlowSample = getCpuTicks();
+
+    if (size_t maxBlock = platform_max_free_block()) {
+        if (maxBlock < maxBlockLowWater) {
+            maxBlockLowWater = maxBlock;
+        }
+    }
+
+    // Consider reporting when the minimum has not yet been reported and it is low enough.
+    if (heapLowWater < heapLowWaterReported && heapLowWater < heapWarnThreshold) {
+        // Report only if it has been a while since the last report or if the memory has
+        // dropped significantly (2k bytes) since the last report.
+        // This prevents a cycle where the reporting itself consumes some heap and triggers another
+        // report, but the true minimum is reported eventually, and large drops are reported immediately.
+        uint32_t ticksSinceReported = (getCpuTicks() - heapLowWaterReportTime);
+        if ((heapLowWater < heapLowWaterReported - 2048) || (ticksSinceReported > (uint32_t)usToCpuTicks(200000))) {
+            //                log_warn("Low memory: " << heapLowWater << " bytes");
+            heapLowWaterReported   = heapLowWater;
+            heapLowWaterReportTime = getCpuTicks();
+        }
+    }
+}
 
 bool pollingPaused = false;
-void polling_loop(void* unused) {
-    add_watchdog_to_task();
-    for (;;) {
-        if (should_exit()) {
-            break;
-        }
+
+// One pass of the polling loop.  Factored out of polling_loop() so that the
+// whole pass can be wrapped in a try block; "continue" becomes "return".
+static void poll_once() {
 
         // Poll the input sources waiting for a complete line to arrive
         /*feedLoopWDT(), */ vTaskDelay(1);
         // Polling is paused when xmodem is using a channel for binary upload
         if (pollingPaused) {
+            // xmodem only pauses channel *input*; log output must keep moving
+            // or every logging task backs up on a full message_queue for the
+            // duration of the binary transfer.
+            drain_output(MESSAGE_QUEUE_DEPTH);
             feed_watchdog();
             vTaskDelay(100);
-            continue;
+            return;
         }
 
         // Polling without an argument checks for realtime characters
         // Polling with an argument both checks for realtime characters and
         // returns a line-oriented command if one is ready.
         pollChannels();
+
+        // Ship queued log output (formerly the dedicated "output" task).
+        drain_output(MESSAGE_QUEUE_DEPTH);
+
         for (auto const& module : Modules()) {
             module->poll();
             feed_watchdog();
         }
 
-        // If activeChannel is non-null, it means that we have received a line
-        // but the task running protocol_main_loop() has not yet picked it up.
-        // activeChannel is thus a form of flow control between the protocol
-        // task that processes GCode lines and other events and this task that
-        // handles IO from channels.
-        if (!activeChannel) {
-            // Job channels have priority
-            if (!Job::active()) {
+        heap_monitor_poll();
+
+        if (!Job::active()) {
+            unwind_cause = nullptr;
+            // No job: every line goes to cmd_queue.  Gate on queue room so a
+            // slow consumer bounds read-ahead - the flow control the old
+            // single slot gave.
+            if (uxQueueSpacesAvailable(cmd_queue)) {
+                poll_input_channel();
+            }
+        } else {
+            if (state_is(State::Alarm) || state_is(State::ConfigAlarm) || state_is(State::Critical)) {
+                log_debug("Unwinding from Alarm");
+                Job::abort();
                 unwind_cause = nullptr;
-                // No job channel is active, so poll all of the serial-style
-                // channels to see if one has a line ready.
-                activeChannel = pollChannels(activeLine);
-            } else {
-                if (state_is(State::Alarm) || state_is(State::ConfigAlarm) || state_is(State::Critical)) {
-                    log_debug("Unwinding from Alarm");
-                    Job::abort();
-                    unwind_cause = nullptr;
-                    continue;
-                }
-                if (unwind_cause) {
-                    Job::abort();
-                    unwind_cause = nullptr;
-                    continue;
-                }
-                // A job channel is active, so accept line-oriented input only
-                // from the job channel on top of the job stack.
-                auto channel = Job::channel();
-                auto status  = channel->pollLine(activeLine);
-                switch (status) {
-                    case Error::Ok:
-                        activeChannel = channel;
-                        break;
-                    case Error::NoData:
-                        break;
-                    case Error::Eof:
-                        notifyf("Job done", "%s job sent", channel->name());
-                        log_debug(channel->name() << " job sent");
-                        Job::unnest();
-                        break;
-                    default:
-                        if (Job::leader) {
-                            log_error_to(*Job::leader,
-                                         static_cast<int>(status) << " (" << errorString(status) << ") in " << channel->name()
-                                                                  << " at line " << channel->lineNumber());
+                return;
+            }
+            if (unwind_cause) {
+                Job::abort();
+                unwind_cause = nullptr;
+                return;
+            }
+
+            // Job channel has priority: feed it while cmd_queue has room, but
+            // not while a line we already handed off is still in flight.
+            // protocol_main_loop frees the cmd_queue slot on xQueueReceive,
+            // before execute_line() runs, so a $sd/run that is about to nest a
+            // child file has not nested it yet; reading the next line here - or
+            // hitting EOF and unnesting - would pull the parent out from under
+            // that pending nest.  The processing ref, held from just before the
+            // handoff below until the consumer's ack, is the "line in flight"
+            // signal; gating on it restores the barrier that the old
+            // single-slot activeChannel handoff provided for free.
+            char buf[Channel::maxLine];
+            if (uxQueueSpacesAvailable(cmd_queue)) {
+                if (Channel* channel = Job::channel(); channel && channel->pending_processing_refs() == 0) {
+                    auto status = channel->pollLine(buf);
+                    switch (status) {
+                        case Error::Ok:
+                            // From the job channel, so execute_line() defers it.
+                            // Hold a processing_ref from here to the consumer's ack.
+                            if (channel->try_acquire_processing_ref()) {
+                                if (execute_line(buf, *channel, AuthenticationLevel::LEVEL_GUEST, false) != Error::Deferred) {
+                                    channel->release_processing_ref();  // not queued after all
+                                }
+                            }
+                            break;
+                        case Error::NoData:
+                            break;
+                        case Error::Eof:
+                            notifyf("Job done", "%s job sent", channel->name());
+                            log_debug(channel->name() << " job sent");
+                            Job::unnest();
+                            break;
+                        default: {
+                            Channel* ldr = Job::leader_channel();
+                            if (ldr) {
+                                log_error_to(*ldr,
+                                             static_cast<int>(status) << " (" << errorString(status) << ") in "
+                                                                      << channel->name() << " at line " << channel->lineNumber());
+                            }
+                            Job::abort();
+                            break;
                         }
-                        Job::abort();
-                        break;
+                    }
                 }
             }
+
+            // Also service the other channels every pass, so interloper reads
+            // and rejections happen promptly.  execute_line() runs or rejects
+            // them on this task; they never enter cmd_queue, so no queue gate.
+            poll_input_channel();
+        }
+
+        // Ship anything an inline command just produced, this pass rather than
+        // next.
+        drain_output(MESSAGE_QUEUE_DEPTH);
+    }
+
+// Reporting allocates, so if the heap is what failed this can throw again.
+// Swallow that too - an exception escaping the polling task is fatal.
+static void report_poll_exception(const char* what) {
+    try {
+        log_error("Polling error: " << what << ", free heap " << xPortGetFreeHeapSize());
+    } catch (...) {}
+}
+
+// A job must survive a transient failure in the IO machinery.  Losing WiFi can
+// squeeze the heap hard enough that an ordinary std::string allocation throws
+// std::bad_alloc, and an exception escaping a raw FreeRTOS task calls
+// std::terminate(), which panics the controller and kills the job with it.
+// Catch here instead and take another pass; motion planning and stepping do
+// not allocate, so the job keeps running.
+void polling_loop(void* unused) {
+    add_watchdog_to_task();
+    for (;;) {
+        if (should_exit()) {
+            break;
+        }
+        try {
+            poll_once();
+        } catch (const std::exception& ex) {
+            report_poll_exception(ex.what());
+            feed_watchdog();
+            vTaskDelay(1);
+        } catch (...) {
+            report_poll_exception("unknown exception");
+            feed_watchdog();
+            vTaskDelay(1);
         }
     }
 }
@@ -229,15 +428,10 @@ void start_polling() {
                                 (1 << SUPPORT_TASK_CORE),  // affinity mask
                                 &pollingTask       // task handle
         );
-        xTaskCreateAffinitySet(output_loop,  // task
-                                "output",     // name for task
-                                16000,
-                                // 8192,              // size of task stack
-                                0,                 // parameters
-                                2,                 // priority
-                                (1 << SUPPORT_TASK_CORE),  // affinity mask
-                                &outputTask        // task handle
-        );
+        // The polling task also drains message_queue (see drain_output()).
+        // outputTask must stay non-null so Channel::sendLine() enqueues
+        // instead of printing inline in the producer's context.
+        outputTask = pollingTask;
     }
 }
 
@@ -246,18 +440,6 @@ static void alarm_msg(ExecAlarm alarm_code) {
     log_stream(allChannels, "ALARM:" << static_cast<int>(alarm_code));
     delay_ms(500);  // Force delay to ensure message clears serial write buffer.
 }
-
-const uint32_t heapWarnThreshold = 15000;
-
-uint32_t heapLowWater           = UINT_MAX;
-uint32_t heapLowWaterReported   = UINT_MAX;
-int32_t  heapLowWaterReportTime = 0;
-
-// Low-water mark of the largest contiguous free block, i.e. the biggest single
-// allocation that would have succeeded.  Tracks fragmentation, which total-free
-// low-water misses.  Stays UINT_MAX on platforms where platform_max_free_block()
-// returns 0 (no API).
-uint32_t maxBlockLowWater = UINT_MAX;
 
 void protocol_main_loop() {
     add_watchdog_to_task();
@@ -271,32 +453,77 @@ void protocol_main_loop() {
         if (should_exit()) {
             break;
         }
-        if (activeChannel) {
-            if (activeChannel->is_closing()) {
-                activeChannel->release_processing_ref();
-                activeChannel = nullptr;
-                continue;
+        // A line collected by the polling task.  xQueueReceive supplies the
+        // barrier that makes item.line fully visible here.
+        LineItem item;
+        if (xQueueReceive(cmd_queue, &item, 0)) {
+            Channel* channel = item.channel;
+            if (channel->is_closing()) {
+                channel->release_processing_ref();
+            } else {
+                if (gcode_echo->get()) {
+                    report_echo_line_received(item.line, allChannels);
+                }
+
+                Channel* ldr         = Job::leader_channel();
+                Channel* out_channel = ldr ? ldr : channel;
+
+                // Single-step mode: pause before each job line exactly like an inferred
+                // M0 ahead of that line, reporting a preview of what will run next. The
+                // line is only executed once a cycle start releases the hold.
+                if (config->_control->_singleBlockPin.get() && Job::active() && !sys.abort()) {
+                    protocol_buffer_synchronize();  // Finish all remaining buffered motion before pausing.
+
+                    // protocol_buffer_synchronize() pumps realtime commands, during which the
+                    // polling task can Job::abort() (Alarm/Critical/unwind_cause) and empty the
+                    // job stack. Fetch the job channel once, afterwards, and skip the pause if it
+                    // is gone rather than dereferencing a null Job::channel(). jc->lineNumber()
+                    // still matches item.line because CMD_QUEUE_DEPTH == 1 and poll_once() will
+                    // not read another job line while our processing_ref is held -- exactly one
+                    // job line is ever in flight; a deeper queue would let that skew.
+                    Channel* jc = Job::channel();
+                    if (jc && !state_is(State::CheckMode)) {
+                        std::string_view preview(item.line);
+                        bool             truncated = preview.size() > 20;
+                        if (truncated) {
+                            preview = preview.substr(0, 20);
+                        }
+                        log_info("Step " << jc->name() << ":" << jc->lineNumber() << " " << preview << (truncated ? "..." : ""));
+
+                        // protocol_execute_realtime() processes the feedhold event and then, because
+                        // the resulting suspend state is non-zero, blocks inside
+                        // protocol_exec_rt_suspend() until a cycle start clears it. So this call is
+                        // itself the wait for resume; nothing further is needed after it.
+                        //
+                        // protocol_exec_rt_suspend()'s wait loop also returns as soon as sys.abort()
+                        // is set, without clearing suspend -- that's the normal path for a reset
+                        // while paused here, not just a resume. Without the sys.abort() check below,
+                        // a reset issued while waiting would still fall through to execute_line() and
+                        // run the very line the reset was meant to discard.
+                        protocol_send_event(&feedHoldEvent);
+                        protocol_execute_realtime();
+                        if (sys.abort()) {
+                            // Must "continue", not fall through: reaching execute_line() below
+                            // would run item.line, the very line this reset should discard.
+                            // The trade-off is that the loop-bottom "sys.set_abort(false)" is
+                            // skipped this pass, so abort stays set one extra iteration (~1ms)
+                            // versus the normal post-execute_line abort path. Harmless here --
+                            // should_exit() is constant-false on ESP32 and the planner is
+                            // already flushed -- and it clears on the next pass.
+                            channel->release_processing_ref();
+                            continue;
+                        }
+                    }
+                }
+
+                Error status_code = execute_line(item.line, *out_channel, AuthenticationLevel::LEVEL_GUEST, true);
+
+                // If the line was aborted, the channel could be invalid.
+                if (!sys.abort()) {
+                    channel->ack(status_code);
+                }
+                channel->release_processing_ref();
             }
-
-            // The input polling task has collected a line of input
-            if (gcode_echo->get()) {
-                report_echo_line_received(activeLine, allChannels);
-            }
-
-            Channel* out_channel = Job::leader ? Job::leader : activeChannel;
-
-            Error status_code = execute_line(activeLine, *out_channel, AuthenticationLevel::LEVEL_GUEST);
-
-            // Tell the channel that the line has been processed.
-            // If the line was aborted, the channel could be invalid
-            if (!sys.abort()) {
-                activeChannel->ack(status_code);
-            }
-
-            // Tell the input polling task that the line has been processed,
-            // so it can give us another one when available
-            activeChannel->release_processing_ref();
-            activeChannel = nullptr;
         }
 
         // Auto-cycle start any queued moves.
@@ -322,30 +549,6 @@ void protocol_main_loop() {
         if (idleEndTime && (getCpuTicks() - idleEndTime) > 0) {
             idleEndTime = 0;  //
             Axes::set_disable(true, false);
-        }
-        uint32_t newHeapSize = xPortGetFreeHeapSize();
-        if (newHeapSize < heapLowWater) {
-            heapLowWater = newHeapSize;
-        }
-        if (size_t maxBlock = platform_max_free_block()) {
-            if (maxBlock < maxBlockLowWater) {
-                maxBlockLowWater = maxBlock;
-            }
-        }
-        // Consider reporting when the minimum has not yet been reported and it is low enough.
-        if (heapLowWater < heapLowWaterReported && heapLowWater < heapWarnThreshold) {
-            // typecast to uint32_t handles roll-over for this case
-            uint32_t ticksSinceReported = (getCpuTicks() - heapLowWaterReportTime);
-            uint32_t tickLimit          = usToCpuTicks(200000);
-            // Report only if it has been a while since the last report or if the memory has
-            // dropped significantly (2k bytes) since the last report.
-            // This prevents a cycle where the reporting itself consumes some heap and triggers another
-            // report, but the true minimum is reported eventually, and large drops are reported immediately.
-            if ((heapLowWater < heapLowWaterReported - 2048) || (ticksSinceReported > tickLimit)) {
-                //                log_warn("Low memory: " << heapLowWater << " bytes");
-                heapLowWaterReported   = heapLowWater;
-                heapLowWaterReportTime = getCpuTicks();
-            }
         }
     }
     return; /* Never reached */
@@ -790,8 +993,18 @@ static void protocol_do_cycle_start() {
             protocol_initiate_homing_cycle();
             break;
         case State::Hold:
-            // Cycle start only when IDLE or when a hold is complete and ready to resume.
-            if (sys.suspend().bit.holdComplete) {
+            // Normally resume only when the hold is complete and ready to resume.
+            // Also resume when there is no motion pending AND no deceleration is
+            // in progress: a hold entered from a non-moving state (a spurious
+            // feed hold while Idle, or one arriving by a path that never called
+            // protocol_hold_complete()) has nothing to decelerate, so
+            // holdComplete would never be set and the state would otherwise be
+            // an inescapable dead end for ~.  The executeHold check keeps a real
+            // decelerating hold - where prep_buffer() may have already discarded
+            // the planner block while decel segments are still draining - from
+            // being released early.
+            if (sys.suspend().bit.holdComplete ||
+                (plan_get_current_block() == nullptr && !sys.step_control.executeHold)) {
                 if (spindle_stop_ovr.value) {
                     spindle_stop_ovr.bit.restoreCycle = true;  // Set to restore in suspend routine and cycle start after.
                 } else {
@@ -1205,16 +1418,16 @@ void protocol_do_rt_reset() {
     protocol_send_event(&restartEvent);
 }
 
-void protocol_do_pin_active(void* vpEventPin) {
-    auto eventPin = static_cast<EventPin*>(vpEventPin);
-    if (eventPin) {  // Safety check; null eventPin should not happen
-        eventPin->trigger(true);
+void protocol_do_pin_active(void* vpInputPin) {
+    auto inputPin = static_cast<InputPin*>(vpInputPin);
+    if (inputPin) {  // Safety check; null inputPin should not happen
+        inputPin->trigger(true);
     }
 }
-void protocol_do_pin_inactive(void* vpEventPin) {
-    auto eventPin = static_cast<EventPin*>(vpEventPin);
-    if (eventPin) {  // Safety check; null eventPin should not happen
-        eventPin->trigger(false);
+void protocol_do_pin_inactive(void* vpInputPin) {
+    auto inputPin = static_cast<InputPin*>(vpInputPin);
+    if (inputPin) {  // Safety check; null inputPin should not happen
+        inputPin->trigger(false);
     }
 }
 
@@ -1255,7 +1468,8 @@ QueueHandle_t event_queue;
 
 void protocol_init() {
     event_queue   = xQueueCreate(50, sizeof(EventItem));
-    message_queue = xQueueCreate(15, sizeof(LogMessage));
+    message_queue = xQueueCreate(MESSAGE_QUEUE_DEPTH, sizeof(LogMessage));
+    cmd_queue     = xQueueCreate(CMD_QUEUE_DEPTH, sizeof(LineItem));
 }
 
 void IRAM_ATTR protocol_send_event_from_ISR(const Event* evt, void* arg) {

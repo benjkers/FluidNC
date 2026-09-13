@@ -27,7 +27,32 @@ spindle_sections: [PWM, Laser, 10V, BESC, HBridge, OnOff, Relay, DAC, PlasmaSpin
 # meaningful for a custom/unsupported VFD (the plain ModbusVFD: key); a
 # named model's own compiled-in class supplies working values for all of
 # them instead, independent of config.yaml.
-vfd_protocol_fields: [model, min_RPM, max_RPM, cw_cmd, ccw_cmd, off_cmd, set_rpm_cmd, get_min_rpm_cmd, get_max_rpm_cmd, get_rpm_cmd]
+vfd_protocol_fields: [safety_polling, model, min_RPM, max_RPM, cw_cmd, ccw_cmd, off_cmd, set_rpm_cmd, get_min_rpm_cmd, get_max_rpm_cmd, get_rpm_cmd]
+
+# Named-VFD spindle type keys -- each registers its own top-level key with
+# a fixed compiled-in Modbus protocol and the same field set as ModbusVFD
+# minus vfd_protocol_fields (grepped from Spindles/VFD/*.cpp).
+vfd_named_types: [DanfossVLT2800, DeltaMS300, FolinnBD600, H100, H2A, Huanyang, MollomG70, NowForever, SiemensV20, YL620]
+
+# Pin-string namespaces beyond the builtin gpio./no_pin/void, from the
+# // @pin_namespace annotations in src/Pins/*.cpp.  `pattern` is the
+# regex body for a bare pin token (before any :attr suffix).
+pin_namespaces:
+  i2so: { pattern: 'i2so\.[0-9]+' }
+  pinext: { pattern: 'pinext[0-9]\.[0-9]+' }
+  uart_channel: { pattern: 'uart_channel[0-9]\.[0-9]+' }
+
+# Per-section structural metadata: which sections repeat and how their
+# instance keys are matched (key_pattern), plus the <i2c_chip> dispatch
+# set.  Sections with no entry here are plain singletons.
+section_meta:
+  axes.<letter>: { repeatable: true, key_pattern: '[xyzabcuvw]' }
+  axes.<letter>.motorN: { repeatable: true, key_pattern: 'motor[01]' }
+  extenders.pinextenderN: { repeatable: true, key_pattern: 'pinextender[0-9]' }
+  extenders.pinextenderN.<i2c_chip>: { child_types: [pca9535_9555, pca9539] }
+  i2cN: { repeatable: true, key_pattern: 'i2c[0-9]' }
+  uartN: { repeatable: true, key_pattern: 'uart[0-9]' }
+  uart_channelN: { repeatable: true, key_pattern: 'uart_channel[0-9]' }
 
 (top-level machine items):
   board:
@@ -274,7 +299,7 @@ parking:
   pullout_distance_mm:
     type: float
     min: 0
-    max: 3e38
+    max: 3.0e+38
     default: '5.0'
     tuning: per-machine
     description: |
@@ -567,6 +592,16 @@ uartN:
     description: |
       Data format (same 3-character code as mode) used while this UART is in passthrough mode.
 
+# Optional nested subsection of a uartN: block, selecting a USB-host virtual COM port backend (ESP32-S3 only) instead of a hardware UART -- registered via UartFactory, like a motor/spindle type. When present, the uartN:'s own txd/rxd/baud/mode fields do not apply.
+uartN.usb_host:
+  baud:
+    type: integer
+    min: 2400
+    max: 3000000
+    default: '115200'
+    description: |
+      Bit rate for the USB virtual COM port. Only the txd/rxd data lines and baud apply to a USB-host UART; there are no gpio pin assignments.
+
 uart_channelN:
   report_interval_ms:
     type: integer
@@ -796,25 +831,25 @@ extenders.pinextenderN.<i2c_chip>:
       Which top-level i2cN: bus this extender chip is attached to. No range is enforced by this item() call itself, but init() asserts it must be 0 or 1.
 
   interrupt0:
-    type: unknown
+    type: pin
     default: 'NO_PIN'
     description: |
       Optional interrupt pin for device 0 in this extender's chain (address baseAddress + 0). When defined, avoids polling that device for input changes.
 
   interrupt1:
-    type: unknown
+    type: pin
     default: 'NO_PIN'
     description: |
       Optional interrupt pin for device 1 in this extender's chain (address baseAddress + 1).
 
   interrupt2:
-    type: unknown
+    type: pin
     default: 'NO_PIN'
     description: |
       Optional interrupt pin for device 2 in this extender's chain (address baseAddress + 2).
 
   interrupt3:
-    type: unknown
+    type: pin
     default: 'NO_PIN'
     description: |
       Optional interrupt pin for device 3 in this extender's chain (address baseAddress + 3).
@@ -897,8 +932,8 @@ axes.<letter>:
 axes.<letter>.homing:
   cycle:
     type: integer
-    min: set_mpos_only
-    max: MAX_N_AXIS
+    min: -1
+    max: 9
     default: '0'
     tuning: per-machine
     description: |
@@ -1105,7 +1140,7 @@ axes.<letter>.motorN.tmc_2130:
   r_sense_ohms:
     type: float
     min: 0.0
-    max: 1.00
+    max: 1.0
     default: '0.0'
     tuning: per-machine
     description: |
@@ -1195,13 +1230,31 @@ axes.<letter>.motorN.tmc_2130:
     max: 63
     default: '0'
     description: |
-      StallGuard sensitivity threshold for this SPI-driven chip family, -64 (most sensitive) to 63 (least sensitive). Only meaningful when run_mode or homing_mode is StallGuard.
+      StallGuard sensitivity threshold for this SPI-driven chip family, -64 (most sensitive) to 63 (least sensitive). Only meaningful when run_mode or homing_mode is StallGuard. Used as-is for the slow (feed) approach phase of homing; see stallguard_seek for the fast (seek) approach phase.
+
+  homing_amps:
+    type: float
+    min: 0.0
+    max: 10.0
+    default: '0.0'
+    default_note: 'substituted with run_amps if left at 0'
+    description: |
+      Motor current while homing, in amps RMS. Leaving this at its default 0 isn't literally "zero current" -- afterParse() detects the default and substitutes run_amps instead, so omitting this field entirely is equivalent to setting it equal to run_amps. Lowering it makes the motor stall sooner and more gently against a hard stop during sensorless homing.
 
   stallguard_debug:
     type: boolean
     default: 'false'
     description: |
       Logs live StallGuard sensor values -- useful for tuning the stallguard threshold for sensorless homing.
+
+  stallguard_seek:
+    type: integer
+    min: -64
+    max: 63
+    default: '(none)'
+    default_note: 'substituted with the stallguard value in afterParse() if not set'
+    description: |
+      Separate StallGuard threshold (-64 to 63) for the fast (seek) approach phase of homing, while the stallguard value is used for the slow (feed) approach. The two phases run at very different speeds, and StallGuard sensitivity is strongly speed-dependent, so a single threshold is often a compromise. If this field is omitted, afterParse() substitutes the stallguard value; an explicit 0 is a real threshold value, not "unset".
 
   toff_coolstep:
     type: integer
@@ -1255,7 +1308,7 @@ axes.<letter>.motorN.tmc_2208:
   r_sense_ohms:
     type: float
     min: 0.0
-    max: 1.00
+    max: 1.0
     default: '0.0'
     tuning: per-machine
     description: |
@@ -1312,6 +1365,8 @@ axes.<letter>.motorN.tmc_2208:
 
   addr:
     type: integer
+    min: 0
+    max: 3
     default: '0'
     tuning: per-machine
     description: |
@@ -1392,7 +1447,7 @@ axes.<letter>.motorN.tmc_2209:
   r_sense_ohms:
     type: float
     min: 0.0
-    max: 1.00
+    max: 1.0
     default: '0.0'
     tuning: per-machine
     description: |
@@ -1449,6 +1504,8 @@ axes.<letter>.motorN.tmc_2209:
 
   addr:
     type: integer
+    min: 0
+    max: 3
     default: '0'
     tuning: per-machine
     description: |
@@ -1489,7 +1546,7 @@ axes.<letter>.motorN.tmc_2209:
     default: '0.0'
     default_note: 'substituted with run_amps if left at 0'
     description: |
-      Motor current while homing. Leaving this at its default 0 isn't literally "zero current" -- afterParse() detects the default and substitutes run_amps instead, so omitting this field entirely is equivalent to setting it equal to run_amps. This fallback is specific to TMC2209; no other Trinamic driver type has a homing_amps field at all.
+      Motor current while homing, in amps RMS. Leaving this at its default 0 isn't literally "zero current" -- afterParse() detects the default and substitutes run_amps instead, so omitting this field entirely is equivalent to setting it equal to run_amps. Lowering it makes the motor stall sooner and more gently against a hard stop during sensorless homing.
 
   stallguard:
     type: integer
@@ -1545,7 +1602,7 @@ axes.<letter>.motorN.tmc_5160:
   r_sense_ohms:
     type: float
     min: 0.0
-    max: 1.00
+    max: 1.0
     default: '0.0'
     tuning: per-machine
     description: |
@@ -1635,13 +1692,31 @@ axes.<letter>.motorN.tmc_5160:
     max: 63
     default: '0'
     description: |
-      StallGuard sensitivity threshold for this SPI-driven chip family, -64 (most sensitive) to 63 (least sensitive). Only meaningful when run_mode or homing_mode is StallGuard.
+      StallGuard sensitivity threshold for this SPI-driven chip family, -64 (most sensitive) to 63 (least sensitive). Only meaningful when run_mode or homing_mode is StallGuard. Used as-is for the slow (feed) approach phase of homing; see stallguard_seek for the fast (seek) approach phase.
+
+  homing_amps:
+    type: float
+    min: 0.0
+    max: 10.0
+    default: '0.0'
+    default_note: 'substituted with run_amps if left at 0'
+    description: |
+      Motor current while homing, in amps RMS. Leaving this at its default 0 isn't literally "zero current" -- afterParse() detects the default and substitutes run_amps instead, so omitting this field entirely is equivalent to setting it equal to run_amps. Lowering it makes the motor stall sooner and more gently against a hard stop during sensorless homing.
 
   stallguard_debug:
     type: boolean
     default: 'false'
     description: |
       Logs live StallGuard sensor values -- useful for tuning the stallguard threshold for sensorless homing.
+
+  stallguard_seek:
+    type: integer
+    min: -64
+    max: 63
+    default: '(none)'
+    default_note: 'substituted with the stallguard value in afterParse() if not set'
+    description: |
+      Separate StallGuard threshold (-64 to 63) for the fast (seek) approach phase of homing, while the stallguard value is used for the slow (feed) approach. The two phases run at very different speeds, and StallGuard sensitivity is strongly speed-dependent, so a single threshold is often a compromise. If this field is omitted, afterParse() substitutes the stallguard value; an explicit 0 is a real threshold value, not "unset".
 
   toff_coolstep:
     type: integer
@@ -1703,7 +1778,7 @@ axes.<letter>.motorN.tmc_2160:
   r_sense_ohms:
     type: float
     min: 0.0
-    max: 1.00
+    max: 1.0
     default: '0.0'
     tuning: per-machine
     description: |
@@ -1793,13 +1868,31 @@ axes.<letter>.motorN.tmc_2160:
     max: 63
     default: '0'
     description: |
-      StallGuard sensitivity threshold for this SPI-driven chip family, -64 (most sensitive) to 63 (least sensitive). Only meaningful when run_mode or homing_mode is StallGuard.
+      StallGuard sensitivity threshold for this SPI-driven chip family, -64 (most sensitive) to 63 (least sensitive). Only meaningful when run_mode or homing_mode is StallGuard. Used as-is for the slow (feed) approach phase of homing; see stallguard_seek for the fast (seek) approach phase.
+
+  homing_amps:
+    type: float
+    min: 0.0
+    max: 10.0
+    default: '0.0'
+    default_note: 'substituted with run_amps if left at 0'
+    description: |
+      Motor current while homing, in amps RMS. Leaving this at its default 0 isn't literally "zero current" -- afterParse() detects the default and substitutes run_amps instead, so omitting this field entirely is equivalent to setting it equal to run_amps. Lowering it makes the motor stall sooner and more gently against a hard stop during sensorless homing.
 
   stallguard_debug:
     type: boolean
     default: 'false'
     description: |
       Logs live StallGuard sensor values -- useful for tuning the stallguard threshold for sensorless homing.
+
+  stallguard_seek:
+    type: integer
+    min: -64
+    max: 63
+    default: '(none)'
+    default_note: 'substituted with the stallguard value in afterParse() if not set'
+    description: |
+      Separate StallGuard threshold (-64 to 63) for the fast (seek) approach phase of homing, while the stallguard value is used for the slow (feed) approach. The two phases run at very different speeds, and StallGuard sensitivity is strongly speed-dependent, so a single threshold is often a compromise. If this field is omitted, afterParse() substitutes the stallguard value; an explicit 0 is a real threshold value, not "unset".
 
   toff_coolstep:
     type: integer
@@ -2070,8 +2163,8 @@ axes.<letter>.motorN.solenoid:
 
   off_percent:
     type: float
-    min: 0.0f
-    max: 100.0f
+    min: 0.0
+    max: 100.0
     default: '0.0'
     tuning: typical
     description: |
@@ -2079,8 +2172,8 @@ axes.<letter>.motorN.solenoid:
 
   pull_percent:
     type: float
-    min: 0.0f
-    max: 100.0f
+    min: 0.0
+    max: 100.0
     default: '100.0'
     tuning: typical
     description: |
@@ -2088,8 +2181,8 @@ axes.<letter>.motorN.solenoid:
 
   hold_percent:
     type: float
-    min: 0.0f
-    max: 100.0f
+    min: 0.0
+    max: 100.0
     default: '75.0'
     tuning: typical
     description: |
@@ -2151,13 +2244,49 @@ axes.<letter>.motorN.dynamixel2:
     description: |
       Update interval, in milliseconds, for refreshing the servo's commanded position.
 
+# Reversing a unipolar axis means swapping the phase pin assignments -- phase0 with phase3 and phase1 with phase2. There is no direction pin to mark :low, and the driver applies no direction inversion of its own.
+axes.<letter>.motorN.unipolar:
+  phase0_pin:
+    type: pin
+    default: 'NO_PIN'
+    pin_attributes: output
+    description: |
+      Coil A drive output, e.g. IN1 on a ULN2003 board.
+
+  phase1_pin:
+    type: pin
+    default: 'NO_PIN'
+    pin_attributes: output
+    description: |
+      Coil B drive output, e.g. IN2 on a ULN2003 board.
+
+  phase2_pin:
+    type: pin
+    default: 'NO_PIN'
+    pin_attributes: output
+    description: |
+      Coil C drive output, e.g. IN3 on a ULN2003 board.
+
+  phase3_pin:
+    type: pin
+    default: 'NO_PIN'
+    pin_attributes: output
+    description: |
+      Coil D drive output, e.g. IN4 on a ULN2003 board.
+
+  half_step:
+    type: boolean
+    default: 'true'
+    description: |
+      True uses the 8-phase half-step sequence, which gives twice the resolution and smoother motion than the 4-phase full-step sequence at some cost in torque.  Setting it false selects full-step, which halves the number of steps per revolution, so steps_per_mm must be halved to match.
+
 # Explicit no-op driver -- takes no fields.
 axes.<letter>.motorN.null_motor:
 PWM:
   tool_num:
     type: integer
     min: 0
-    max: MaxToolNumber
+    max: 99999999
     default: '0'
     tuning: typical
     description: |
@@ -2261,7 +2390,7 @@ Laser:
   tool_num:
     type: integer
     min: 0
-    max: MaxToolNumber
+    max: 99999999
     default: '0'
     tuning: typical
     description: |
@@ -2339,7 +2468,7 @@ Laser:
   tool_num:
     type: integer
     min: 0
-    max: MaxToolNumber
+    max: 99999999
     default: '0'
     tuning: typical
     description: |
@@ -2456,7 +2585,7 @@ BESC:
   tool_num:
     type: integer
     min: 0
-    max: MaxToolNumber
+    max: 99999999
     default: '0'
     tuning: typical
     description: |
@@ -2577,7 +2706,7 @@ HBridge:
   tool_num:
     type: integer
     min: 0
-    max: MaxToolNumber
+    max: 99999999
     default: '0'
     tuning: typical
     description: |
@@ -2681,7 +2810,7 @@ OnOff:
   tool_num:
     type: integer
     min: 0
-    max: MaxToolNumber
+    max: 99999999
     default: '0'
     tuning: typical
     description: |
@@ -2776,7 +2905,7 @@ Relay:
   tool_num:
     type: integer
     min: 0
-    max: MaxToolNumber
+    max: 99999999
     default: '0'
     tuning: typical
     description: |
@@ -2871,7 +3000,7 @@ DAC:
   tool_num:
     type: integer
     min: 0
-    max: MaxToolNumber
+    max: 99999999
     default: '0'
     tuning: typical
     description: |
@@ -2966,7 +3095,7 @@ PlasmaSpindle:
   tool_num:
     type: integer
     min: 0
-    max: MaxToolNumber
+    max: 99999999
     default: '0'
     tuning: typical
     description: |
@@ -3047,7 +3176,7 @@ ModbusVFD:
   tool_num:
     type: integer
     min: 0
-    max: MaxToolNumber
+    max: 99999999
     default: '0'
     tuning: typical
     description: |
@@ -3136,7 +3265,7 @@ ModbusVFD:
     type: integer
     min: 0
     max: 5
-    default: '2'
+    default: '1'
     description: |
       Debug message verbosity: 0-1 no debug info, 2 shows missing responses and speed info, 3+ also shows raw Rx/Tx Modbus messages.
 
@@ -3153,6 +3282,13 @@ ModbusVFD:
     default: '5'
     description: |
       Number of failed Modbus exchanges tolerated before raising an alarm.
+
+  safety_polling:
+    type: boolean
+    default: 'false'
+    default_note: '""'
+    description: |
+      VFD is polled for speed continuously
 
   model:
     type: string
@@ -3355,9 +3491,10 @@ kinematics.CoreXY:
     description: |
       Compensation factor for midTbot-style machines where the motors themselves move in X, so a cartesian X move corresponds to a larger motor-space move. Leave at 1 on CoreXY machines where the motors don't move in X.
 
-# No config items at all -- Midtbot::group()/Cartesian::group() are empty. Midtbot hardcodes its x_scaler to 2.0 in init() rather than exposing it as a config item, since that ratio is a fixed property of the midTbot hardware design, not something a user should tune.
-# kinematics.midtbot / kinematics.Cartesian: (no config items)
-
+# No config items -- Midtbot::group() is empty. Midtbot hardcodes its x_scaler to 2.0 in init() rather than exposing it as a config item, since that ratio is a fixed property of the midTbot hardware design, not something a user should tune.
+kinematics.midtbot:
+# No config items -- Cartesian::group() is empty.
+kinematics.Cartesian:
 # Registered via a runtime loop over a list of (event, name, letter) tuples, not literal handler.item() calls -- see ItemDocs.md's "data-driven item lists" section. Extracted here from the @config annotations directly.
 control:
   safety_door_pin:
@@ -3436,6 +3573,13 @@ control:
     pin_attributes: input
     description: |
       Runs $H (home all) when active.
+
+  single_block_pin:
+    type: pin
+    default: 'NO_PIN'
+    pin_attributes: input
+    description: |
+      Toggles single-block (step) mode when active. Unlike the other pins above, this one works even without a config entry: it is always reachable via the pin-event mechanism (Channel::registerVirtualPin(), set up in init()), on every channel. A real Pin here is optional, for anyone who also wants a physical switch/expander input to control it.
 
 # Same data-driven-list shape as control: above.
 user_inputs:

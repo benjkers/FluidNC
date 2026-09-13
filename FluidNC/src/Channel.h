@@ -42,10 +42,20 @@ private:
     static constexpr int timeout = 2000;
 
 public:
+    // PinLowFirst/PinHighFirst are inclusive lower bounds and PinLowLast/PinHighLast
+    // are exclusive upper bounds (see the "cmd < PinLowLast" style checks in
+    // handleRealtimeCharacter()), so each range should span a full 0x40 codepoints,
+    // for pin indices 0-63. Making *Last one codepoint short of the next range's
+    // *First, as previously written, wasted one codepoint per range (0x13f and 0x17f
+    // decoded to neither a Low nor a High pin event) and capped the usable pin index
+    // at 62 instead of 63.
     static constexpr int PinLowFirst  = 0x100;
-    static constexpr int PinLowLast   = 0x13f;
+    static constexpr int PinLowLast   = 0x140;
     static constexpr int PinHighFirst = 0x140;
-    static constexpr int PinHighLast  = 0x17f;
+    static constexpr int PinHighLast  = 0x180;
+    // Highest usable pin-event index, e.g. for a well-known software pin that every
+    // channel should recognize regardless of per-instance/per-config pin assignment.
+    static constexpr int MaxPinIndex = PinLowLast - PinLowFirst - 1;
 
     static constexpr int maxLine = 255;
 
@@ -60,6 +70,21 @@ protected:
 
     mutable SemaphoreHandle_t _queue_mutex = xSemaphoreCreateMutex();
     std::queue<uint8_t>       _queue;
+
+    // _queue holds non-realtime input bytes seen by pollLine(nullptr) until a
+    // pollLine(line) call consumes them.  A channel that is polled for realtime
+    // characters but never for lines - e.g. any non-job channel while a job is
+    // running - would otherwise grow _queue without bound.  Bound it at a few
+    // lines of slack (~4).  When a new line arrives with the queue already at
+    // the bound, that whole line is discarded through its newline; a line
+    // already in progress is allowed to finish, so the queue never holds a
+    // partial line.  State below is touched only under _queue_mutex.
+    static constexpr size_t _queue_limit        = 4 * maxLine;
+    bool                    _queue_at_line_start = true;   // last queued byte ended a line (or queue empty)
+    bool                    _queue_discarding    = false;  // dropping the rest of an over-limit line
+    bool                    _queue_overflow_logged = false;  // one debug line per overflow episode
+    // Enqueue one non-realtime input byte, applying the whole-line drop policy.
+    void queue_push(uint8_t byte);
 
     uint32_t _reportInterval = 0;
     int32_t  _nextReportTime = 0;
@@ -80,6 +105,12 @@ protected:
     Cmd _last_rt_cmd = Cmd::None;
 
     std::map<int, InputPin*> _pins;
+
+    // Pin events not tied to any one Channel instance -- shared across all channels,
+    // so a pin registered here is recognized on every current and future channel
+    // (WebSocket, Telnet, UART, ...), unlike _pins above which is per-instance and
+    // only reachable on whichever channel a real/configured Pin happens to be bound to.
+    static std::map<int, InputPin*> _virtual_pins;
 
     UTF8 _utf8;
 
@@ -217,6 +248,11 @@ public:
 
     void ready();
     void registerEvent(pinnum_t pinnum, InputPin* obj);
+
+    // Registers obj at pinnum in the shared, channel-independent virtual-pin table
+    // (see _virtual_pins). Intended to be called once, during single-threaded init,
+    // before any channel starts polling.
+    static void registerVirtualPin(pinnum_t pinnum, InputPin* obj);
 
     size_t lineNumber() { return _line_number; }
     void   setLineNumber(size_t line_number) { _line_number = line_number; }

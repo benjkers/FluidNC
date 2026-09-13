@@ -6,6 +6,8 @@
 #include "Driver/Console.h"
 #include "WebUIServer.h"
 #include <cstdio>
+#include <memory>
+#include <algorithm>  // std::remove
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
 #include <freertos/semphr.h>
@@ -35,7 +37,7 @@ namespace WebUI {
     }
 
     WSChannel::WSChannel(AsyncWebSocket* server, objnum_t clientNum, std::string session) :
-        Channel("websocket"), _server(server), _clientNum(clientNum), _session(session) {
+        Channel("websocket"), _server(server), _clientNum(clientNum), _session(session), _lastActivityMs(millis()) {
         setReportInterval(200);  // we will set automatic reporting on by default for now
         if (auto client = get_client(_server, _clientNum)) {
             client->setCloseClientOnQueueFull(false);
@@ -144,12 +146,34 @@ namespace WebUI {
     }
 
     void WSChannel::flush() {
-        flush_output(true);
+        // Non-blocking: the tail ships from pollLine() on the next poll pass.
+        // (Was flush_output(true) - a blocking spin that is unacceptable now
+        // that WSChannel::write() runs on the shared polling task.)
+        flush_output(false);
     }
 
     size_t WSChannel::write(const uint8_t* buffer, size_t size) {
         if (buffer == NULL || !_active || !size) {
             return 0;
+        }
+
+        // With a non-blocking flush there is no producer backpressure, so a
+        // client that has stopped draining would grow _output_line without
+        // bound on the polling task's heap.  Check the incoming size against
+        // the backlog limit *before* appending - otherwise one large write
+        // could grow _output_line past WS_OUT_MAX_BACKLOG before the drop
+        // fires, briefly defeating the bounded-heap guarantee this is for.
+        if (_output_line.length() + size > WS_OUT_MAX_BACKLOG) {
+            size_t dropped = _output_line.length();
+            std::string().swap(_output_line);
+            _active = false;  // clear/deactivate first: the diagnostic below can
+                               // throw (it queues through the shared log path),
+                               // and state must not be left half-torn-down if it does.
+            if (auto client = get_client(_server, _clientNum)) {
+                client->close();
+            }
+            log_debug_to(Console, "WebSocket cid#" << _clientNum << " backlog " << dropped << "+" << size << ", closing");
+            return size;
         }
 
         // Coalesce output: accumulate here and emit at most one frame per
@@ -163,7 +187,7 @@ namespace WebUI {
         _output_line.append(reinterpret_cast<const char*>(buffer), size);
 
         if (_output_line.length() >= WS_OUT_FLUSH_LEN) {
-            flush_output(true);
+            flush_output(false);  // non-blocking - this runs on the polling task
         }
         return size;
     }
@@ -263,7 +287,13 @@ namespace WebUI {
                 wsChannel->flushRx();
 
                 _wsChannels.erase(it);
-                allChannels.kill(wsChannel);
+                if (!allChannels.kill(wsChannel)) {
+                    // Could not queue the channel for deletion (kill queue full,
+                    // or never created).  It is deactivated and off _wsChannels,
+                    // but still registered with AllChannels - it will keep being
+                    // polled (returning nothing) and its memory is not reclaimed.
+                    log_error_to(Console, "Could not queue WebSocket cid#" << num << " for deletion, leaking it");
+                }
                 break;
             }
         }
@@ -355,6 +385,43 @@ namespace WebUI {
         }
     }
 
+    // Reap WSChannels that have been silent for stale_ms AND whose underlying
+    // AsyncWebSocketClient is no longer connected - i.e. the socket went away
+    // (often an RST with no FIN) but the WS_EVT_DISCONNECT event that would have
+    // called removeChannel() never arrived, orphaning the channel and its heap.
+    // The connection check means a live-but-idle client is never touched.
+    void WSChannels::reapStaleChannels(AsyncWebSocket* server, uint32_t stale_ms) {
+        const uint32_t now = millis();
+
+        // Collect candidates into a fixed stack buffer so nothing is allocated
+        // (and nothing can throw) while ws_channels_mutex is held, and reap only
+        // a few per call: an orphan is rare, so clearing a handful per poll
+        // keeps us well under the AllChannels kill-queue depth.
+        static constexpr size_t maxPerCycle = 4;
+        objnum_t                candidateIds[maxPerCycle];
+        size_t                  candidateCount = 0;
+        {
+            xSemaphoreTake(ws_channels_mutex, portMAX_DELAY);
+            for (auto const wsChannel : _wsChannels) {
+                if (candidateCount >= maxPerCycle) {
+                    break;
+                }
+                if ((now - wsChannel->lastActivityMs()) >= stale_ms) {
+                    candidateIds[candidateCount++] = wsChannel->id();
+                }
+            }
+            xSemaphoreGive(ws_channels_mutex);
+        }
+
+        for (size_t i = 0; i < candidateCount; ++i) {
+            if (get_client(server, candidateIds[i])) {
+                continue;  // still connected at the WS layer - leave it alone
+            }
+            log_debug_to(Console, "Reaping orphaned WebSocket cid#" << candidateIds[i]);
+            removeChannel(candidateIds[i]);
+        }
+    }
+
     void WSChannels::handleEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsEventType type, void* arg, uint8_t* data, size_t len) {
         uint32_t num = client->id();
         _server      = server;
@@ -368,51 +435,95 @@ namespace WebUI {
                 log_debug_to(Console, "WebSocket disconnect cid#" << num);
                 break;
             case WS_EVT_CONNECT: {
-                auto*      request    = static_cast<AsyncWebServerRequest*>(arg);
-                auto       session    = request ? WebUI_Server::getWebSocketSession(request, client) : std::string {};
-                WSChannel* newChannel = new WSChannel(server, num, session);
-                if (!newChannel) {
-                    log_error_to(Console, "Creating WebSocket channel failed");
-                } else {
-                    std::string uri((char*)server->url());
-                    IPAddress   ip = client->remoteIP();
+                auto* request = static_cast<AsyncWebServerRequest*>(arg);
+                auto  session = request ? WebUI_Server::getWebSocketSession(request, client) : std::string {};
 
-                    std::string s;
-                    {
-                        xSemaphoreTake(ws_channels_mutex, portMAX_DELAY);
-                        _lastWSChannel = newChannel;
-                        _wsChannels.push_back(newChannel);
+                // Own the new channel locally until it is fully published.  If any
+                // step below throws (e.g. a vector reallocation running out of heap
+                // during a connection burst), the unique_ptr frees it and nothing
+                // is left dangling in _wsChannels or the AllChannels registry.
+                std::unique_ptr<WSChannel> owned;
+                try {
+                    owned = std::make_unique<WSChannel>(server, num, session);
+                } catch (...) {
+                    log_error_to(Console, "Creating WebSocket channel failed cid#" << num);
+                    client->close();  // don't leave an upgraded socket with no channel
+                    break;
+                }
+                WSChannel* newChannel = owned.get();
+
+                const char* uri = (const char*)server->url();  // borrowed, logged below; no allocation
+                IPAddress   ip  = client->remoteIP();
+
+                // The newest websocket for a session wins. Actively close any older
+                // sockets instead of waiting for the old page to cooperate.  Done
+                // before newChannel is published so a throw here (it builds a
+                // std::vector) just unwinds `owned` with nothing left dangling.
+                closeSessionChannels(session, num);
+
+                bool listErr = false;
+                const bool held = xSemaphoreTake(ws_channels_mutex, portMAX_DELAY) == pdTRUE;
+                try {
+                    _wsChannels.push_back(newChannel);
+                    _lastWSChannel = newChannel;
+                } catch (...) {
+                    listErr = true;  // vector reallocation ran out of heap
+                }
+                if (held) {
+                    xSemaphoreGive(ws_channels_mutex);
+                }
+                if (listErr) {
+                    log_error_to(Console, "WebSocket channel list allocation failed cid#" << num);
+                    client->close();
+                    break;  // owned destructs here -> channel freed
+                }
+
+                try {
+                    allChannels.registration(newChannel);
+                } catch (...) {
+                    // erase/remove/back on a vector of pointers do not allocate.
+                    const bool unwindHeld = xSemaphoreTake(ws_channels_mutex, portMAX_DELAY) == pdTRUE;
+                    _wsChannels.erase(std::remove(_wsChannels.begin(), _wsChannels.end(), newChannel), _wsChannels.end());
+                    if (_lastWSChannel == newChannel) {
+                        _lastWSChannel = _wsChannels.empty() ? nullptr : _wsChannels.back();
+                    }
+                    if (unwindHeld) {
                         xSemaphoreGive(ws_channels_mutex);
                     }
+                    log_error_to(Console, "WebSocket registration failed cid#" << num);
+                    client->close();
+                    break;  // owned destructs here -> channel freed
+                }
+                owned.release();  // ownership handed to _wsChannels / AllChannels
 
-                    // The newest websocket for a session wins. Actively close any older
-                    // sockets instead of waiting for the old page to cooperate.
-                    closeSessionChannels(session, num);
+                // This tells WebUI the ID of the newly-created websocket
+                // so it can include that ID in a PAGEID= argument to
+                // direct output to that websocket
 
-                    allChannels.registration(newChannel);
+                std::string s = "currentID:";  // webui3
+                s += std::to_string(num);
+                send_control_message(client, s);
 
-                    // This tells WebUI the ID of the newly-created websocket
-                    // so it can include that ID in a PAGEID= argument to
-                    // direct output to that websocket
+                s = "CURRENT_ID:";  // webui2
+                s += std::to_string(num);
+                send_control_message(client, s);
 
-                    s = "currentID:";  // webui3
-                    s += std::to_string(num);
-                    send_control_message(client, s);
-
-                    s = "CURRENT_ID:";  // webui2
-                    s += std::to_string(num);
-                    send_control_message(client, s);
-
-                    log_debug_to(Console, "WebSocket connect cid#" << num << " from " << ip << " uri " << uri << " session " << session);
-                    for (auto const pin : _pins) {
-                        newChannel->registerEvent(pin.first, pin.second);
-                    }
+                log_debug_to(Console, "WebSocket connect cid#" << num << " from " << ip << " uri " << uri << " session " << session);
+                for (auto const pin : _pins) {
+                    newChannel->registerEvent(pin.first, pin.second);
+                }
+            } break;
+            case WS_EVT_PING:
+            case WS_EVT_PONG: {
+                if (auto wsChannel = getWSChannel(num, {})) {
+                    wsChannel->noteActivity(millis());
                 }
             } break;
             case WS_EVT_DATA: {
                 AwsFrameInfo* info      = (AwsFrameInfo*)arg;
                 auto          wsChannel = getWSChannel(num, {});
                 if (wsChannel) {
+                    wsChannel->noteActivity(millis());
                     if (info->opcode == WS_TEXT) {
                         //data[len]=0; // !!! this should not be safe? but was there before,
                         // will copy to a std::string of specified length to be on the safe side

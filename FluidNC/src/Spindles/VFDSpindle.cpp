@@ -260,7 +260,7 @@ namespace Spindles {
         handler.item("modbus_id", _modbus_id, 0, 247);  // per https://modbus.org/docs/PI_MBUS_300.pdf
 
         // @config debug
-        // @default 2
+        // @default 1
         // Debug message verbosity: 0-1 no debug info, 2 shows missing responses and speed
         // info, 3+ also shows raw Rx/Tx Modbus messages.
         handler.item("debug", _debug, 0, 5);
@@ -278,5 +278,15 @@ namespace Spindles {
         Spindle::group(handler);
         Spindle::groupDelaySettings(handler);
         detail_->group(handler);
+    }
+
+    // Called from the step ISR in place of a virtual dispatch, which would have
+    // to read this class's vtable out of flash.  IRAM_ATTR, and the qualified
+    // call keeps it non-virtual.
+    static void IRAM_ATTR vfdspindle_speed_thunk(Spindle* s, uint32_t dev_speed) {
+        static_cast<VFDSpindle*>(s)->VFDSpindle::setSpeedfromISR(dev_speed);
+    }
+    Spindle::IsrSpeedFn VFDSpindle::isr_speed_fn() {
+        return vfdspindle_speed_thunk;
     }
 }

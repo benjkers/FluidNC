@@ -65,7 +65,13 @@ namespace WebUI {
         // Used by js/statusdlg.js
         static Error showSysStatsJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP420
 
-            JSONencoder j(&out);
+            // Tagged so a raw serial-shaped channel (UART, or this wasm
+            // port's ShimChannel) wraps the output in [JSON:...] lines,
+            // distinguishing JSON payload lines from the ok/error line that
+            // terminates the command -- see UartChannel::out_acked(). Over
+            // WSChannel/WebClient (real WebSocket/HTTP), the tag is a no-op:
+            // those channels already have their own message framing.
+            JSONencoder j(&out, "SysStats");
             j.begin();
             j.member("cmd", "420");
             j.member("status", "ok");
@@ -86,8 +92,9 @@ namespace WebUI {
             return Error::Ok;
         }
 
-        static void send_json_command_response(Channel& out, uint cmdID, bool isok, const std::string& message) {
-            JSONencoder j(&out);
+        static void send_json_command_response(Channel& out, uint32_t cmdID, bool isok, const std::string& message) {
+            // See showSysStatsJSON() above for why this is tagged.
+            JSONencoder j(&out, "CmdResponse");
             j.begin();
             j.member("cmd", String(cmdID).c_str());
             j.member("status", isok ? "ok" : "error");
@@ -135,7 +142,8 @@ namespace WebUI {
 
         // Used by js/setting.js
         static Error listSettingsJSON(const char* parameter, AuthenticationLevel auth_level, Channel& out) {  // ESP400
-            JSONencoder j(&out);
+            // See showSysStatsJSON() above for why this is tagged.
+            JSONencoder j(&out, "Settings");
             j.begin();
             j.member("cmd", "400");
             j.member("status", "ok");
@@ -165,7 +173,8 @@ namespace WebUI {
                 }
             }
 
-            JSONencoder j(&out);
+            // See showSysStatsJSON() above for why this is tagged.
+            JSONencoder j(&out, "EEPROM");
 
             j.begin();
             j.begin_array("EEPROM");
@@ -221,15 +230,15 @@ namespace WebUI {
             // RU - need user or admin password to read
             // WU - need user or admin password to set
             // WA - need admin password to set
-            new WebCommand(NULL, WEBCMD, WU, "ESP420", "System/Stats", showSysStats, anyState);
+            new WebReportCommand(NULL, WEBCMD, WU, "ESP420", "System/Stats", showSysStats, anyState);
             new WebCommand("RESTART", WEBCMD, WA, "ESP444", "System/Control", setSystemMode);
 
             //      new WebCommand("ON|OFF", WEBCMD, WA, "ESP115", "Radio/State", setRadioState);
 
             new WebCommand("P=position T=type V=value", WEBCMD, WA, "ESP401", "WebUI/Set", setWebSetting);
-            new WebCommand(NULL, WEBCMD, WU, "ESP400", "WebUI/List", listSettings, anyState);
-            new WebCommand(NULL, WEBCMD, WG, "ESP0", "WebUI/Help", showWebHelp, anyState);
-            new WebCommand(NULL, WEBCMD, WG, "ESP", "WebUI/Help", showWebHelp, anyState);
+            new WebReportCommand(NULL, WEBCMD, WU, "ESP400", "WebUI/List", listSettings, anyState);
+            new WebReportCommand(NULL, WEBCMD, WG, "ESP0", "WebUI/Help", showWebHelp, anyState);
+            new WebReportCommand(NULL, WEBCMD, WG, "ESP", "WebUI/Help", showWebHelp, anyState);
         }
     };
     ModuleFactory::InstanceBuilder<WebCommands> web_commands_module __attribute__((init_priority(103))) ("web_commands", true);
