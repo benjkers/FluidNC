@@ -50,7 +50,7 @@ axes:
       feed_scaler: 1.100
 
     motor0:
-      limit_neg_pin: gpio.33:high
+      limit_pos_pin: gpio.33:high
       hard_limits: false
       pulloff_mm: 0.5
       standard_stepper:
@@ -210,7 +210,7 @@ uart1:
 
 Cumark:
   atc: atc_custom
-  poll_ms: 100
+  poll_ms: 250
   uart_num: 1
   modbus_id: 1
   tool_num: 0
