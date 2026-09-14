@@ -1,213 +1,182 @@
 board: 6x CNC Controller
 name: 6x Default
-
 arc_tolerance_mm: 0.002
-junction_deviation_mm: 0.020
+junction_deviation_mm: 0.02
 report_inches: false
-
 stepping:
   engine: I2S_STREAM
   idle_ms: 255
-  pulse_us: 10
-  dir_delay_us: 1
-  disable_delay_us: 1
-
-
+  pulse_us: 3
+  dir_delay_us: 5
+  disable_delay_us: 0
 kinematics:
   TCPCartesian:
-    pivot_x_mm: -236.6276      
-    pivot_y_mm: -140.0000
+    pivot_x_mm: -236.6276
+    pivot_y_mm: -140
     pivot_z_mm: -219.6375
-    axis_x:  0.001908
-    axis_y:  0.999998
-    axis_z: -0.000820
-    segment_length_mm: 1.0
+    axis_x: 0.001908
+    axis_y: 0.999998
+    axis_z: -0.00082
+    segment_length_mm: 1
     segment_angle_deg: 0.8
     max_segments: 20000
     scale_feedrate: true
-    max_feed_scale: 10.0
+    max_feed_scale: 10
     rotate_tool_offset: false
     check_soft_limits: true
-
-
-
 axes:
-
   x:
     steps_per_mm: 640
-    max_rate_mm_per_min: 4600
+    max_rate_mm_per_min: 7400
     acceleration_mm_per_sec2: 1200
-    max_travel_mm: 484.000
+    max_travel_mm: 484
     soft_limits: true
     homing:
       cycle: 2
       positive_direction: true
-      mpos_mm: 0 
-      feed_mm_per_min: 100.000
-      seek_mm_per_min: 600
+      mpos_mm: 0
+      feed_mm_per_min: 100
+      seek_mm_per_min: 1000
       settle_ms: 500
-      seek_scaler: 1.100
-      feed_scaler: 1.100
-
+      seek_scaler: 1.1
+      feed_scaler: 1.1
     motor0:
-      limit_pos_pin: gpio.33:high
+      limit_pos_pin: gpio.33
       hard_limits: false
       pulloff_mm: 0.5
       standard_stepper:
-        step_pin: I2SO.2
-        direction_pin: I2SO.1:high
-        disable_pin: I2SO.0
-      
-
+        step_pin: i2so.2
+        direction_pin: i2so.1
+        disable_pin: i2so.0
+      limit_neg_pin: NO_PIN
+      limit_all_pin: NO_PIN
   y:
     steps_per_mm: 640
-    max_rate_mm_per_min: 4600
+    max_rate_mm_per_min: 7400
     acceleration_mm_per_sec2: 1200
-    max_travel_mm: 493.000
+    max_travel_mm: 493
     soft_limits: true
     homing:
       cycle: 2
       positive_direction: false
-      mpos_mm: -493.000
-      feed_mm_per_min: 100.000
-      seek_mm_per_min: 400.000
+      mpos_mm: -493
+      feed_mm_per_min: 100
+      seek_mm_per_min: 1000
       settle_ms: 500
-      seek_scaler: 1.100
-      feed_scaler: 1.100
-
+      seek_scaler: 1.1
+      feed_scaler: 1.1
     motor0:
-      limit_neg_pin: gpio.32:high:pd
+      limit_neg_pin: gpio.32:pd
       hard_limits: false
       pulloff_mm: 1
       standard_stepper:
-        step_pin: I2SO.5
-        direction_pin: I2SO.4:low
-        disable_pin: I2SO.7
-
-
+        step_pin: i2so.5
+        direction_pin: i2so.4:low
+        disable_pin: i2so.7
+      limit_pos_pin: NO_PIN
+      limit_all_pin: NO_PIN
   z:
     steps_per_mm: 640
-    max_rate_mm_per_min: 4000
+    max_rate_mm_per_min: 6000
     acceleration_mm_per_sec2: 1200
-
-    max_travel_mm: 275.000
+    max_travel_mm: 275
     soft_limits: true
     homing:
       cycle: 1
       positive_direction: true
       mpos_mm: 0
-      feed_mm_per_min: 100.000
-      seek_mm_per_min: 400.000
+      feed_mm_per_min: 100
+      seek_mm_per_min: 1000
       settle_ms: 500
-      seek_scaler: 1.100
-      feed_scaler: 1.100
-
+      seek_scaler: 1.1
+      feed_scaler: 1.1
     motor0:
-      limit_pos_pin: gpio.35:high
+      limit_pos_pin: gpio.35
       hard_limits: false
-      pulloff_mm: 2.0
+      pulloff_mm: 2
       standard_stepper:
-        step_pin: I2SO.13
-        direction_pin: I2SO.12:low
-        disable_pin: I2SO.15
-        
+        step_pin: i2so.13
+        direction_pin: i2so.12:low
+        disable_pin: i2so.15
+      limit_neg_pin: NO_PIN
+      limit_all_pin: NO_PIN
   b:
     steps_per_mm: 55.555
-    max_rate_mm_per_min: 2600
-    acceleration_mm_per_sec2: 800
-
+    max_rate_mm_per_min: 3000
+    acceleration_mm_per_sec2: 1000
     motor0:
       standard_stepper:
-        step_pin: I2SO.10
-        direction_pin: I2SO.9:low
-        disable_pin: I2SO.8
-
-
+        step_pin: i2so.10
+        direction_pin: i2so.9:low
+        disable_pin: i2so.8
+      limit_neg_pin: NO_PIN
+      limit_pos_pin: NO_PIN
+      limit_all_pin: NO_PIN
 i2so:
   bck_pin: gpio.22
   data_pin: gpio.21
   ws_pin: gpio.17
-
 spi:
   miso_pin: gpio.19
   mosi_pin: gpio.23
   sck_pin: gpio.18
-
 sdcard:
   card_detect_pin: NO_PIN
   cs_pin: gpio.5
-  
 control:
-  fault_pin: gpio.26:low:pu
+  fault_pin: gpio.26:pu:low
   safety_door_pin: NO_PIN
-  estop_pin: gpio.36:high
-  feed_hold_pin: gpio.27:low:pu  
-  cycle_start_pin: gpio.2:low:pu
+  estop_pin: gpio.36
+  feed_hold_pin: gpio.27:pu:low
+  cycle_start_pin: gpio.2:pu:low
   macro0_pin: NO_PIN
   macro1_pin: NO_PIN
   macro2_pin: NO_PIN
   macro3_pin: NO_PIN
-
+  reset_pin: NO_PIN
 macros:
-  startup_line0: $SD/Run=StartUp.nc 
-  startup_line1: 
-  macro0: 
-  macro1: 
-  macro2:
-  macro3:
-  after_homing:
+  startup_line0: $SD/Run=StartUp.nc
   after_reset: $SD/Run=StartUp.nc
-  after_unlock: 
-
 user_outputs:
   digital0_pin: gpio.12
   digital1_pin: gpio.4
-
-
 probe:
   pin: gpio.34:low
   check_mode_start: true
   hard_stop: false
   toolsetter_pin: gpio.39:low
-  
-
 coolant:
   flood_pin: I2SO.18
   mist_pin: I2SO.16
   delay_ms: 0
 start:
   must_home: true
-
 atc_custom:
-  ets_mpos_mm: -22.400 -22.000 -294
-  ets_rapid_z_offset_mm: 10.000
-  ets_probe_overtravel_mm: 4.000
-  ets_slow_approach_feed_mm_min: 200.000
-  ets_fast_approach_feed_mm_min: 4000.000
+  ets_mpos_mm: '-22.400 -22.000 -294'
+  ets_rapid_z_offset_mm: 10
+  ets_probe_overtravel_mm: 4
+  ets_slow_approach_feed_mm_min: 200
+  ets_fast_approach_feed_mm_min: 4000
   gauge_line_length_mm: 63.666
   manual_gauge_range_mm: 25.000 200.000
   tool_holder_pulloff_mm: 0.0 35.0 15.0 0.0 0.0 0.0
   first_tool_number: 2
-  tool_count: 6              
-  gauge_filename: "Tool_Gauges_Lengths.txt" 
-  slot1_mpos_mm: -1.100 -487 -176
-  slot2_mpos_mm: -100.200 -489 -174.5
-  slot3_mpos_mm: -198.100 -489 -173.1
-  slot4_mpos_mm: -283.800 -489 -172.8
-  slot5_mpos_mm: -380.000 -489 -172.9
-  slot6_mpos_mm: -477.200 -489 -172.3
+  tool_count: 6
+  gauge_filename: Tool_Gauges_Lengths.txt
+  slot1_mpos_mm: '-1.100 -487 -176'
+  slot2_mpos_mm: '-100.200 -489 -174.5'
+  slot3_mpos_mm: '-198.100 -489 -173.1'
+  slot4_mpos_mm: '-283.800 -489 -172.8'
+  slot5_mpos_mm: '-380.000 -489 -172.9'
+  slot6_mpos_mm: '-477.200 -489 -172.3'
   spindle_stop_time: 2.5
   coolant_on_time: 2.5
-
-
-  
 uart1:
   txd_pin: gpio.15
   rxd_pin: gpio.16
   rts_pin: gpio.14
   baud: 38400
   mode: 8N1
-
 Cumark:
   atc: atc_custom
   poll_ms: 250
@@ -221,7 +190,7 @@ Cumark:
   adaptive_feed_floor_percent: 20
   adaptive_feed_min_percent: 25
   adaptive_feed_max_percent: 150
-  adaptive_feed_gain_down: 2.0
+  adaptive_feed_gain_down: 2
   adaptive_feed_gain_up: 0.5
   adaptive_feed_deadband_percent: 2
   adaptive_feed_aggressive_step: 50
@@ -230,5 +199,5 @@ Cumark:
   available_torque_rpm: 0 3000 6000 9000 12000 15000 18000
   available_torque_pct: 101.6 101.6 74.5 38.2 22.3 11.9 4.6
   adaptive_max_rpm: 12000
-  goal_safety_fraction: 0.70
+  goal_safety_fraction: 0.7
   tier2_fraction: 0.85
