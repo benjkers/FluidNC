@@ -11,12 +11,12 @@ stepping:
   disable_delay_us: 0
 kinematics:
   TCPCartesian:
-    pivot_x_mm: -236.6276
-    pivot_y_mm: -140
-    pivot_z_mm: -219.6375
-    axis_x: 0.001908
-    axis_y: 0.999998
-    axis_z: -0.00082
+    pivot_x_mm: -235.881
+    pivot_y_mm: 0.15
+    pivot_z_mm: -219.189
+    axis_x: 0
+    axis_y: 1
+    axis_z: 0
     segment_length_mm: 1
     segment_angle_deg: 0.8
     max_segments: 20000
@@ -27,8 +27,8 @@ kinematics:
 axes:
   x:
     steps_per_mm: 640
-    max_rate_mm_per_min: 7400
-    acceleration_mm_per_sec2: 1200
+    max_rate_mm_per_min: 6500
+    acceleration_mm_per_sec2: 1150
     max_travel_mm: 484
     soft_limits: true
     homing:
@@ -52,8 +52,8 @@ axes:
       limit_all_pin: NO_PIN
   y:
     steps_per_mm: 640
-    max_rate_mm_per_min: 7400
-    acceleration_mm_per_sec2: 1200
+    max_rate_mm_per_min: 6500
+    acceleration_mm_per_sec2: 1150
     max_travel_mm: 493
     soft_limits: true
     homing:
@@ -152,7 +152,7 @@ coolant:
 start:
   must_home: true
 atc_custom:
-  ets_mpos_mm: '-22.400 -22.000 -294'
+  ets_mpos_mm: '-22.700 -21.000 -294'
   ets_rapid_z_offset_mm: 10
   ets_probe_overtravel_mm: 4
   ets_slow_approach_feed_mm_min: 200
