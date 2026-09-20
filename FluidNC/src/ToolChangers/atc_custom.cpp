@@ -59,13 +59,17 @@ namespace ATCs {
 
     void Custom_ATC::run_macro_restoring(bool tcp_was_on, bool spindle_was_on, bool was_inch_mode) {
         if (spindle_was_on) {
-            _macro.addf("M3");
+            _macro.addf("M5"); //always leave spindle off after tool change, can be returned on with gcode or post
+        } else {
+            _macro.addf("M5");
         }
         if (was_inch_mode) {
             _macro.addf("G20");
         }
         if (tcp_was_on) {
             _macro.addf("M128");
+        } else {
+            _macro.addf("M129");
         }
                 _macro.run(nullptr);
     }
@@ -507,10 +511,7 @@ namespace ATCs {
                     _prev_tool = new_tool;
                     move_to_safe_z();
                     save_gauge_table();
-                    if (spindle_was_on) {
-                        _macro.addf("M3");
-                    }
-                    run_macro_restoring(tcp_was_on, spindle_was_on, was_inch_mode);
+                    run_macro_restoring(tcp_was_on, false, was_inch_mode);
                     return true;
                 }
                 
@@ -688,6 +689,7 @@ namespace ATCs {
     //   runtime from #<_fusion_tool_gauge> (set by the post processor for
     //   manual/non-rack tools), falling back to manual_gauge.
     void Custom_ATC::probe_toolsetter(float approach_gauge_estimate, bool use_dynamic_fusion_gauge) {
+        _macro.addf("M5");  // turn off spindle 
         // The tip plane we rapid the tool tip down to (a bit above the top
         // surface). Spindle-nose Z is this plus the gauge length.
         const float tip_plane = _ets_mpos[2] + _ets_rapid_z_offset;
