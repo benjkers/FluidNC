@@ -6,7 +6,7 @@ report_inches: false
 stepping:
   engine: I2S_STREAM
   idle_ms: 255
-  pulse_us: 3
+  pulse_us: 4
   dir_delay_us: 5
   disable_delay_us: 0
 kinematics:
