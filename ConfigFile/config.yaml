@@ -11,9 +11,9 @@ stepping:
   disable_delay_us: 0
 kinematics:
   TCPCartesian:
-    pivot_x_mm: -236.702
-    pivot_y_mm: 0.15
-    pivot_z_mm: -219.101
+    pivot_x_mm: -236.656
+    pivot_y_mm: -4.406
+    pivot_z_mm: -219.301
     axis_x: 0
     axis_y: 1
     axis_z: 0

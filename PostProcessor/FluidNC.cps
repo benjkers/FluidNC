@@ -45,6 +45,26 @@ properties = {
     scope      : "operation",
     enabled    : ["milling", "drilling"]
   },
+  // PER-OPERATION property, same pattern as above.
+  //
+  // enabled:["probing"] keeps the tick off every milling operation, where it
+  // would do nothing. The field itself is proven -- adaptiveFeedGoal above
+  // uses it -- but "probing" as the token for Fusion's inspection operations
+  // is NOT documented; Autodesk publish `scope` and not the operation-type
+  // strings `enabled` accepts. If the post dialog ever comes up with its
+  // properties list EMPTY, that token is the cause: delete this one line and
+  // everything comes back, with the tick simply showing on every operation.
+  // Ticking it somewhere it does not belong is still caught at post time by
+  // the check in onCyclePoint, so nothing depends on this filter being right.
+  bLevelPoint: {
+    title      : "B level: use this point",
+    description: "Tick this on a Probe Geometry - Surface cycle to feed its result into the B-axis levelling macro. Tick exactly TWO of them: the post captures the machine X and Z of each touch plus that operation's nominal X and Bottom Height, then calls /Probing/ProbeBLevel.nc after the second one. The macro works out how far the part is tilted about B and writes that angle into the work offset's B component, so work B0 becomes 'this part is level'. Nothing rotates. The two faces do NOT have to be at the same height: the designed step between them comes from the operations' own Bottom Heights and is taken back out of the measurement. Spread the two points as far apart in X as the part allows -- the angle resolves as probe scatter over that span. Ticked cycles pair up in program order, so four ticks means two levelling passes. Level BEFORE probing XYZ into the same offset.",
+    group      : "operationProps",
+    type       : "boolean",
+    value      : false,
+    scope      : "operation",
+    enabled    : ["probing"]
+  },
   homeXYOnRotary: {
     title      : "Home XY on 4th/5th axis moves",
     description: "Retracts to machine home in X and Y (in addition to the Z retract that always happens) before any 4th/5th axis repositioning move. Use this when tall or off-centre work on the rotary axis could swing into the spindle or column as it indexes. The retract uses whatever 'Safe Retracts' method is selected above.",
@@ -196,8 +216,6 @@ var gPlaneModal = createOutputVariable({onchange:function () {gMotionModal.reset
 var gAbsIncModal = createOutputVariable({}, gFormat); // modal group 3 // G90-91
 var gFeedModeModal = createOutputVariable({}, gFormat); // modal group 5 // G93-94
 var gUnitModal = createOutputVariable({}, gFormat); // modal group 6 // G20-21
-var fourthAxisClamp = createOutputVariable({}, mFormat);
-var fifthAxisClamp = createOutputVariable({}, mFormat);
 
 var settings = {
   coolant: {
@@ -250,18 +268,308 @@ var settings = {
   outputToolLengthCompensation: false, // specifies if tool length compensation code should be output (G43)
   outputToolLengthOffset      : false, // specifies if tool length offset code should be output (Hxx)
   supportsOptionalBlocks      : false, // specifies if optional block output is supported
+  // Cancel RPCP before every G53 retract. Those retracts are the machine's
+  // own moves -- clearing the part, going to the rack, going to the
+  // toolsetter -- and with M128 active they would be run through the
+  // kinematics instead, which with B off zero drags X and Z along with them.
+  // A retract also precedes every tool change, so this is what guarantees the
+  // ATC's macro runs with RPCP off; the whole thing works in machine
+  // coordinates. writeInitialPositioning turns it back on for any section
+  // that needs it.
+  allowCancelTCPBeforeRetracting: true,
   // fixed settings below, do not modify
-  supportsTCP                 : false, // this postprocessor does not support TCP
-  supportsRadiusCompensation  : false // this postprocessor does not support tool radius compensation
+  supportsTCP                 : true // FluidNC TCPCartesian kinematics, switched with M128/M129
 };
+
+// ===========================================================================
+// NO-ATC MACHINES -- renumber the tools out of the rack range
+// ===========================================================================
+// atc_custom.h decides what is a rack tool with
+//     is_rack_tool(t) { return t >= _first_tool_number && t < _first_tool_number + _tool_count; }
+// which on this machine is T2..T7. T1 is PROBE_TOOL and T100 is
+// GAUGE_SETTER_TOOL. EVERY other number is already handled as a manual tool:
+// the ATC parks over the toolsetter and waits on M0 instead of going to a
+// pocket, then measures the gauge length it does not have stored.
+//
+// So nothing has to be switched off for a machine without a changer. Each
+// tool only has to land outside T2..T7 and the existing firmware path does
+// the right thing -- including Fusion's machine simulation, which draws the
+// manual sequence for any out-of-rack number without being told (see
+// atcSimulateToolChange: newSlot < 0 takes the manual branch).
+//
+// T1 and T100 pass straight through. Renumbering either would break probing
+// or toolsetter calibration, since the firmware keys off those two numbers.
+// ===========================================================================
+// ---------------------------------------------------------------------
+// FIXED BEHAVIOUR
+//
+// These five were post properties. They are constants now so the post
+// dialog stays short -- every one of them was only ever going to be left
+// on its default. Change them here if that stops being true.
+// ---------------------------------------------------------------------
+// "auto" decides from the machine definition's declared tool count;
+// "yes" keeps rack tool numbers whatever it says; "no" always renumbers.
+var ATC_PRESENT = "auto";
+// Comma-separated text matched against the machine's vendor/model/
+// description, as a fallback for a definition whose tool count is wrong.
+// "" switches the fallback off.
+var NO_ATC_NAME_MATCH = "";
+// "fusion" uses the machine selected in the setup, which is what lets
+// Fusion simulate with the machine model; "post" always uses the built-in
+// B-axis definition. Either way the built-in one covers a setup with no
+// machine selected.
+var MACHINE_CONFIG_SOURCE = "fusion";
+// Replay the tool changer's real path into the machine simulation.
+var SIMULATE_ATC_MOVES = true;
+// Which offset ProbeBLevel.nc writes its angle into. 0 = the active one.
+var B_LEVEL_OFFSET = 0;
+
+var PROBE_TOOL = 1;          // atc_custom.h PROBE_TOOL
+var GAUGE_SETTER_TOOL = 100; // atc_custom.h GAUGE_SETTER_TOOL
+
+// Derived from atcGeometry rather than written out, so a change to the rack
+// in config.yaml only has to be mirrored in one place in this post. Computed
+// on call, not at load time: atcGeometry is declared further down the file.
+function manualToolFirst() {
+  return atcGeometry.firstToolNumber + atcGeometry.slots.length; // 2 + 6 = T8
+}
+
+function manualToolLast() {
+  return GAUGE_SETTER_TOOL - 1;
+}
+
+var machineVendor = "";
+var machineModel = "";
+var machineDescription = "";
+var machineWasSelected = false;
+var machineToolCount = -1;   // magazine capacity, for the header only
+var machineHasChanger;       // the definition's tool-changer tick; undefined = not answered
+var usingFusionMachine = false; // true when the setup's own machine is in use
+var noAtcMachine = false;
+var toolRenumber = {};       // Fusion number -> posted number
+var toolRenumberList = [];   // the same, in first-use order, for the header
+
+function captureMachineIdentity() {
+  // Read all of this BEFORE defineMachine() runs. That function replaces
+  // machineConfiguration with one built from scratch here, which declares no
+  // tools and carries no vendor, model or description -- so by the time
+  // anything else looks, the selected machine's definition is gone. This is
+  // also why writeProgramHeader's 'Machine' block has been coming out empty.
+  machineWasSelected = false;
+  try {
+    machineWasSelected = machineConfiguration.isReceived() ? true : false;
+  } catch (e) {
+    machineWasSelected = false;
+  }
+  machineVendor = safeMachineCall("getVendor", "");
+  machineModel = safeMachineCall("getModel", "");
+  machineDescription = safeMachineCall("getDescription", "");
+  var n = safeMachineCall("getNumberOfTools", -1);
+  machineToolCount = (typeof n == "number") ? n : -1;
+  // THE tick in the machine definition: "Automatic tool changer" there,
+  // getToolChanger() here, isToolChangerAutomatic in the Fusion API --
+  // "If your machine has an automatic tool changer, set this to true. For
+  // machines with manual tool change capabilities, set this to false."
+  //
+  // This is the question being asked, so it is what decides. The tool count
+  // is a magazine capacity and says nothing about whether there is a changer
+  // to put tools in it; it is carried along for the header only.
+  //
+  // undefined means the kernel did not answer at all, which is reported
+  // rather than guessed around.
+  var v = safeMachineCall("getToolChanger", undefined);
+  machineHasChanger = (typeof v == "boolean") ? v : undefined;
+}
+
+function safeMachineCall(fn, fallback) {
+  // Guarded because an absent machine configuration makes these throw rather
+  // than return empty, and no machine selected is a perfectly normal case.
+  try {
+    if (typeof machineConfiguration[fn] != "function") {
+      return fallback;
+    }
+    var v = machineConfiguration[fn]();
+    if (typeof fallback == "string") {
+      return v ? String(v) : "";
+    }
+    return v;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function machineIdentityText() {
+  var parts = [];
+  if (machineVendor) {
+    parts.push(machineVendor);
+  }
+  if (machineModel) {
+    parts.push(machineModel);
+  }
+  if (machineDescription) {
+    parts.push(machineDescription);
+  }
+  return parts.join(" ");
+}
+
+// The answer comes from the MACHINE DEFINITION, because the rack is a
+// property of the machine and the machine Fusion has selected is the thing
+// that knows. Specifically from its tool-changer tick, not from the tool
+// count -- a magazine capacity says nothing about whether there is a changer.
+function noAtcReason() {
+  var mode = ATC_PRESENT;
+  if (mode == "yes") {
+    return null;
+  }
+  if (mode == "no") {
+    return "forced by ATC_PRESENT in the post";
+  }
+  if (!machineWasSelected) {
+    return "no machine is selected in the setup";
+  }
+  if (machineHasChanger === false) {
+    return "the machine definition has no automatic tool changer";
+  }
+  // Fallback for a definition that does not fill the field in at all.
+  var needles = String(NO_ATC_NAME_MATCH).toLowerCase().split(",");
+  var hay = machineIdentityText().toLowerCase();
+  for (var i = 0; hay && i < needles.length; ++i) {
+    var n = needles[i].replace(/^\s+/, "").replace(/\s+$/, "");
+    if (n && hay.indexOf(n) >= 0) {
+      return "the machine name matches '" + n + "'";
+    }
+  }
+  return null;
+}
+
+function passThroughTool(n) {
+  return n == PROBE_TOOL || n == GAUGE_SETTER_TOOL;
+}
+
+function buildToolRenumber() {
+  toolRenumber = {};
+  toolRenumberList = [];
+  if (!noAtcMachine) {
+    return;
+  }
+  // First-use order, so the numbers climb in the order the operator will be
+  // asked for them rather than in whatever order Fusion's tool library is in.
+  var next = manualToolFirst();
+  for (var i = 0; i < getNumberOfSections(); ++i) {
+    var t = getSection(i).getTool().number;
+    if (passThroughTool(t) || toolRenumber[t] !== undefined) {
+      continue;
+    }
+    if (next > manualToolLast()) {
+      error(localize("This job needs more than " + (manualToolLast() - manualToolFirst() + 1) +
+        " manual tools, which would run past T" + manualToolLast() +
+        " into the toolsetter reference tool T" + GAUGE_SETTER_TOOL + "."));
+      return;
+    }
+    toolRenumber[t] = next;
+    toolRenumberList.push([t, next]);
+    ++next;
+  }
+}
+
+function mapTool(n) {
+  var m = toolRenumber[n];
+  return (m === undefined) ? n : m;
+}
+
+// The offset of whichever rotary axis is enabled -- the pivot position, which
+// only matters when TCP is off and Fusion is doing that arithmetic itself.
+// Guarded: not every kernel revision exposes getOffset().
+function rotaryAxisOffset() {
+  try {
+    var axes = [machineConfiguration.getAxisU(), machineConfiguration.getAxisV(),
+      machineConfiguration.getAxisW()];
+    for (var i = 0; i < axes.length; ++i) {
+      if (axes[i].isEnabled() && typeof axes[i].getOffset == "function") {
+        return axes[i].getOffset();
+      }
+    }
+  } catch (e) {
+    return undefined;
+  }
+  return undefined;
+}
+
+// Checks the selected machine actually describes this one. Called after
+// activateMachine(), which is where tcp.isSupportedByMachine is worked out
+// from the axes. Each of these would otherwise change the posted output
+// silently rather than failing, which is the worst way to find out.
+function validateMachineDefinition() {
+  if (!usingFusionMachine) {
+    return;
+  }
+  var problems = [];
+  if (!machineConfiguration.isMultiAxisConfiguration()) {
+    problems.push("it has no rotary axis. Add the B axis in Machine Builder, " +
+      "or set MACHINE_CONFIG_SOURCE to \"post\" in the post.");
+  } else {
+    if (!machineConfiguration.isMachineCoordinate(1)) {
+      problems.push("its rotary axis is not B. TCPCartesian compensates a B " +
+        "rotary, so set the axis coordinate to B.");
+    }
+    if (machineConfiguration.isHeadConfiguration()) {
+      problems.push("its rotary axis is on the head. This one carries the " +
+        "part, so it has to be defined as a table axis -- the distinction " +
+        "decides which side of the cut gets compensated.");
+    }
+    // TCP off is a supported way to run, not a fault. Both modes do full
+    // multi-axis moves; what changes is WHO compensates the rotary pivot.
+    //
+    //   TCP on   the posted XYZ is the tool tip in the part frame and the
+    //            firmware turns it into machine moves. M128/M129 switch it.
+    //   TCP off  Fusion has already folded the pivot geometry into the
+    //            posted XYZ, so the firmware must leave it alone.
+    //
+    // Either is fine; mixing them is not, and that is what the checks below
+    // are for. The per-operation decision is already made correctly further
+    // down by isTCPSupportedByOperation(), which goes off the section's
+    // optimised TCP mode -- with TCP off in the definition Fusion optimises
+    // the positions itself and the post never emits M128.
+    if (!tcp.isSupportedByMachine) {
+      // With TCP off, Fusion does the pivot arithmetic, which it can only do
+      // from the axis offset in the definition. A zero offset means it has
+      // not been entered, and every multi-axis move would be wrong by the
+      // whole pivot distance.
+      var off = rotaryAxisOffset();
+      if (off !== undefined && !off.isNonZero()) {
+        warning(localize("TCP is off, so Fusion compensates the rotary pivot " +
+          "itself -- but the B axis offset in the machine definition is zero. " +
+          "Enter the pivot position there, or every multi-axis move will be " +
+          "out by the pivot distance."));
+      }
+    }
+  }
+  for (var i = 0; i < problems.length; ++i) {
+    error(localize("Machine definition '" + (machineIdentityText() || "unnamed") +
+      "' cannot drive this post: " + problems[i]));
+  }
+}
+
 
 function onOpen() {
   // define and enable machine configuration
   receivedMachineConfiguration = machineConfiguration.isReceived();
+  captureMachineIdentity(); // must precede defineMachine, which wipes it
   if (typeof defineMachine == "function") {
     defineMachine(); // hardcoded machine configuration
   }
   activateMachine(); // enable the machine optimizations and settings
+  validateMachineDefinition(); // after activateMachine: it works out TCP support
+
+  noAtcMachine = noAtcReason(); // the reason string, or null when there is a rack
+  buildToolRenumber();
+
+  // One file per operation calls onOpen repeatedly in the same post run, so
+  // both of these have to start fresh for each output file. atcSimulatedTool
+  // in particular would otherwise claim the spindle still holds the last
+  // file's tool, and show a drop that the real machine will not make.
+  bLevelPointCount = 0;
+  atcSimulatedTool = -1;
 
   if (!getProperty("separateWordsWithSpace")) {
     setWordSeparator("");
@@ -295,6 +603,22 @@ function writeProgramStart() {
   writeBlock(gAbsIncModal.format(90), gFeedModeModal.format(94));
   writeBlock(gPlaneModal.format(17));
   writeBlock(gUnitModal.format(unit == MM ? 21 : 20));
+  // Assert RPCP off, like G90 and G21 above. M128/M129 is modal in the
+  // CONTROLLER and survives the end of a program, but the post only assumes
+  // state.tcpIsActive starts false -- so setTCP(false) would write nothing
+  // and a program left in M128 by the last job would still be in it.
+  //
+  // That matters most with TCP off in the machine definition, where Fusion
+  // has already folded the pivot into the posted XYZ: a stale M128 would
+  // have the firmware apply it a second time, on top.
+  //
+  // Written directly rather than through setTCP() on purpose. This is about
+  // the controller's modal state before the program runs; the simulation
+  // stream has not started, and setTCP() would push a TCPOFF into it and
+  // flip state.lengthCompensationActive as a side effect, neither of which
+  // belongs here.
+  writeBlock(mFormat.format(129));
+  state.tcpIsActive = false;
 }
 
 function onSection() {
@@ -312,15 +636,21 @@ function onSection() {
     }
     writeRetract(Z); // retract
     if (isFirstSection()) {
-      cancelWorkPlane(machineConfiguration.isMultiAxisConfiguration() && settings.workPlaneMethod.useTiltedWorkplane);
-      if (machineConfiguration.isMultiAxisConfiguration()) {
-        positionABC(new Vector(0, 0, 0));
-      }
+      // The kernel's first-section block normally does
+      //     positionABC(new Vector(0, 0, 0));
+      // here. Removed: it rapids the rotary to work B0 BEFORE writeWCS and
+      // before the tool change, so the B0 it drives to belongs to whatever
+      // offset the previous program left selected -- any machine angle at
+      // all. It is redundant as well, because this section's own
+      // orientation is indexed later by setWorkPlane -> positionABC(abc,
+      // true), after G54 is out.
+      //
+      // The only thing lost is that getWorkPlaneMachineABC() assumes
+      // currentABC = (0,0,0) on the first section, which the call used to
+      // make true. With a single B rotary that assumption only picks
+      // between B and B+-360, so the cost is which way round it unwinds.
       forceABC();
     } else {
-      if (insertToolCall || newWorkPlane) {
-        cancelWorkPlane();
-      }
     }
   }
 
@@ -724,6 +1054,78 @@ function probeZSurface(nz, z) {
 }
 
 
+// ---------------------------------------------------------------------
+// B-AXIS LEVELLING -- the "B level: use this point" operation property.
+//
+// Two Z touches are enough to find how far the part is tilted about B. A
+// face that is flat in the part frame sits at machine height
+//
+//     Z = za + [w + (X - xa) * sin t] / cos t
+//
+// with w its nominal height, t the tilt and xa/za the pivot. Differencing
+// the two touches removes the pivot AND the part origin -- which matters,
+// because nothing has been zeroed yet -- and leaves
+//
+//     dZ * cos t - dX * sin t = dNominalZ
+//
+// which the macro solves in closed form. Only the machine X and Z of each
+// touch and the two NOMINAL heights appear in it, so:
+//   - the two faces may be at different heights, and
+//   - tool length, ball radius, the ball riding up a tilted plane and Z
+//     pre-travel are all common to both touches and cancel. Nothing here
+//     needs calibrating.
+//
+// The post's job is only to capture the numbers:
+//   #5061 / #5063   machine X / Z of the last touch
+//   nominal X / Z   this operation's probe point and Bottom Height
+// ---------------------------------------------------------------------
+var bLevelPointCount = 0;
+
+function bLevelWanted() {
+  // A scope:"operation" property arrives on currentSection.properties;
+  // getProperty is the fallback. Same pattern as adaptiveFeedGoal.
+  if (currentSection.properties && currentSection.properties.bLevelPoint !== undefined) {
+    return currentSection.properties.bLevelPoint ? true : false;
+  }
+  return getProperty("bLevelPoint", false) ? true : false;
+}
+
+function bLevelBefore() {
+  // #5061/#5063 are machine coordinates and the macro reasons in the
+  // machine frame, so the touches must not be made through TCP. Routed
+  // through setTCP rather than a bare M129 so state.tcpIsActive stays
+  // honest and a later section turns TCP back on for itself.
+  //
+  // Forced, because M128/M129 is modal in the CONTROLLER while the post
+  // merely assumes it starts off. Run after a program that ended with TCP
+  // on and an unforced call writes nothing, so the touches would go
+  // through the kinematics and #5061/#5063 would not mean what the macro
+  // thinks they mean.
+  setTCP(false, true);
+}
+
+function bLevelAfter(nomX, nomZ) {
+  var n = (bLevelPointCount % 2) + 1; // 1, 2, 1, 2, ... -- pairs in order
+  ++bLevelPointCount;
+  writeComment("B level point " + n + " captured");
+  writeBlock("#<_bl_x" + n + ">=#5061");
+  writeBlock("#<_bl_y" + n + ">=#5062");
+  writeBlock("#<_bl_z" + n + ">=#5063");
+  writeBlock("#<_bl_nx" + n + ">=" + xyzFormat.format(nomX));
+  writeBlock("#<_bl_nz" + n + ">=" + xyzFormat.format(nomZ));
+  if (n == 1) {
+    return;
+  }
+  writeBlock("#<_bl_mode>=1");
+  writeBlock("#<_bl_wcs>=" + B_LEVEL_OFFSET);
+  runProbeMacro("ProbeBLevel.nc");
+  // The macro has just changed the offset's B component WITHOUT moving
+  // the machine, so the work B angle is no longer the number bOutput last
+  // wrote. Without this the next indexing move can be suppressed as a
+  // no-change and the part never gets rotated.
+  forceABC();
+}
+
 function probeChannel(axis, width, withIsland, nx, ny, z) {
   writeProbeParams({
     widthX: (axis == "X") ? width : undefined,
@@ -816,6 +1218,13 @@ function onCyclePoint(x, y, z) {
     return;
   }
 
+  // Caught at post time rather than letting the tick do nothing: the
+  // levelling maths needs a Z touch, so only a surface cycle can feed it.
+  if (bLevelWanted() && cycleType != "probing-z") {
+    error(localize("'B level: use this point' only works on a Probe Geometry - Surface (Z) cycle. This operation posts as " + cycleType + "."));
+    return;
+  }
+
   // Circular features carry their size in width1, NOT in a "diameter"
   // property -- confirmed from a cycle-property dump, where cycle.diameter
   // does not exist on any cycle. Reading it gave undefined and the format
@@ -839,7 +1248,15 @@ function onCyclePoint(x, y, z) {
     break;
   case "probing-z":
     writeComment("Probing Z surface");
-    probeZSurface(z, z);
+    if (bLevelWanted()) {
+      bLevelBefore();
+      probeZSurface(z, z);
+      // x is the probe point in the driving offset; probedSurfaceZ(z) is
+      // Fusion's Bottom Height, i.e. this face's nominal height in it.
+      bLevelAfter(x, probedSurfaceZ(z));
+    } else {
+      probeZSurface(z, z);
+    }
     break;
 
   // ---- corners ----------------------------------------------------
@@ -993,11 +1410,6 @@ function onCircular(clockwise, cx, cy, cz, x, y, z, feed) {
   updateAdaptiveFeedForMovement();
   // one of X/Y and I/J are required and likewise
 
-  if (pendingRadiusCompensation >= 0) {
-    error(localize("Radius compensation cannot be activated/deactivated for a circular move."));
-    return;
-  }
-
   var start = getCurrentPosition();
 
   if (isFullCircle()) {
@@ -1072,21 +1484,36 @@ function onCommand(command) {
     writeBlock(sOutput.format(spindleSpeed), mFormat.format(tool.clockwise ? 3 : 4));
     return;
   case COMMAND_LOAD_TOOL:
+    // mapTool() is identity on an ATC machine. On one without a changer it
+    // renumbers clear of the rack so the firmware takes its manual path.
+    var postedTool = mapTool(tool.number);
     // T100 is the known-gauge-length reference/calibration tool -- it
     // doesn't have a comparable "expected" gauge length from Fusion in the
     // same sense as a real cutting tool, so it's excluded here.
-    if (tool.number != 100) {
+    if (postedTool != GAUGE_SETTER_TOOL) {
       if (getProperty("outputToolGaugeVariable")) {
         writeBlock("#<_fusion_tool_gauge>=" + xyzFormat.format(getBodyLength(tool)));
       }
     }
     if (getProperty("outputToolChange")) {
-      writeToolBlock("T" + toolFormat.format(tool.number), mFormat.format(6));
+      // Anything outside the rack is a tool the operator has to fetch and
+      // fit, so say which one, and which holder it lives in, right where
+      // they will be standing when the machine stops for it.
+      if (atcSlotIndex(postedTool) < 0) {
+        writeComment("--- MANUAL TOOL CHANGE ---");
+        writeToolSummary(tool, "  ");
+      }
+      writeToolBlock("T" + toolFormat.format(postedTool), mFormat.format(6));
+      // Replay the ATC's real rack path into the simulation stream so
+      // collisions during the change are visible. Writes nothing to the NC
+      // file, and is a no-op when not simulating. Fed the POSTED number, so
+      // a renumbered tool draws the manual sequence instead of a rack pick.
+      atcSimulateToolChange(postedTool, getBodyLength(tool));
     } else {
       machineSimulation({mode:TOOLCHANGE}); // simulate tool change
     }
     writeComment(tool.comment);
-    if (tool.number != 100 && getProperty("outputToolLengthCheck")) {
+    if (postedTool != GAUGE_SETTER_TOOL && getProperty("outputToolLengthCheck")) {
       // Compares #<_fusion_tool_gauge> above against whatever the machine
       // has recorded (a mastered rack tool) or just measured (a manual
       // tool) for the tool now in the spindle -- see Macros/CheckToolGauge.nc
@@ -1094,20 +1521,9 @@ function onCommand(command) {
     }
     return;
   case COMMAND_LOCK_MULTI_AXIS:
-    if (machineConfiguration.isMultiAxisConfiguration()) {
-      // writeBlock(fourthAxisClamp.format(25)); // lock 4th axis
-      if (machineConfiguration.getNumberOfAxes() > 4) {
-        // writeBlock(fifthAxisClamp.format(35)); // lock 5th axis
-      }
-    }
-    return;
   case COMMAND_UNLOCK_MULTI_AXIS:
-    if (machineConfiguration.isMultiAxisConfiguration()) {
-      // writeBlock(fourthAxisClamp.format(26)); // unlock 4th axis
-      if (machineConfiguration.getNumberOfAxes() > 4) {
-        // writeBlock(fifthAxisClamp.format(36)); // unlock 5th axis
-      }
-    }
+    // The B axis has no clamp. Swallowed here so the generic mapCommand
+    // lookup at the end of this function does not emit anything for them.
     return;
   case COMMAND_BREAK_CONTROL:
     writeBlock("$SD/Run=BreakDetection.nc");
@@ -1117,8 +1533,8 @@ function onCommand(command) {
     // Re-probes/re-stores the gauge length of whatever tool is currently
     // in the spindle -- a no-op (with a logged error) if it's not a rack
     // tool or isn't the tool actually loaded. See atc_custom.cpp's M101.
-    writeBlock("M101 T" + toolFormat.format(tool.number));
-    writeComment(localize("MEASURE TOOL " + tool.number));
+    writeBlock("M101 T" + toolFormat.format(mapTool(tool.number)));
+    writeComment(localize("MEASURE TOOL " + mapTool(tool.number)));
     return;
   }
 
@@ -1153,6 +1569,21 @@ function writeProgramEnd() {
   if (getSetting("retract.homeXY.onProgramEnd", false)) {
     writeRetract(settings.retract.homeXY.onProgramEnd);
   }
+  // Cancel RPCP before the B axis is sent home, and before the program ends.
+  //
+  // Two reasons. The machine is left in a known state for jogging, the
+  // toolsetter and the ATC macros, all of which work in machine coordinates
+  // -- M128/M129 is modal in the controller and nothing else was turning it
+  // off, so a multi-axis job used to finish with it still on.
+  //
+  // And the reset below is a bare rotation this way. With TCP still active,
+  // sending B to 0 holds the tool tip still relative to the part, so the
+  // linear axes move as well -- an unasked-for XYZ move at the end of a job.
+  // Off first, and B goes home while nothing else does.
+  //
+  // Unforced: a 3-axis program never turned it on, and writeProgramStart
+  // has already asserted it off, so there is nothing to cancel.
+  setTCP(false);
   forceWorkPlane();
   setWorkPlane(new Vector(0, 0, 0)); // reset working plane
   onCommand(COMMAND_STOP_SPINDLE);
@@ -1164,6 +1595,11 @@ function writeProgramEnd() {
 
 function onClose() {
   optionalSection = false;
+  // A lone tick captures a point and then never runs the macro, so the
+  // part silently stays unlevelled. Say so at post time instead.
+  if (bLevelPointCount % 2) {
+    error(localize("B level: an odd number of points is ticked. Each levelling pass needs exactly two."));
+  }
   // Don't leave adaptive feed control active for whatever runs after this
   // job (manual MDI moves, the next unrelated program, etc.).
   currentAdaptiveFeedGoal = 0;
@@ -1305,25 +1741,10 @@ function getBodyLength(tool) {
   return tool.bodyLength + tool.holderLength;
 }
 
+// FluidNC's feed rate modes are G93 and G94 -- there is no G95, and no
+// parametric #-variable feed scheme, so this is just the number.
 function getFeed(f) {
-  if (getProperty("useG95")) {
-    return feedOutput.format(f / spindleSpeed); // use feed value
-  }
-  if (typeof activeMovements != "undefined" && activeMovements) {
-    var feedContext = activeMovements[movement];
-    if (feedContext != undefined) {
-      if (!feedFormat.areDifferent(feedContext.feed, f)) {
-        if (feedContext.id == currentFeedId) {
-          return ""; // nothing has changed
-        }
-        forceFeed();
-        currentFeedId = feedContext.id;
-        return settings.parametricFeeds.feedOutputVariable + (settings.parametricFeeds.firstFeedParameter + feedContext.id);
-      }
-    }
-    currentFeedId = undefined; // force parametric feed next time
-  }
-  return feedOutput.format(f); // use feed value
+  return feedOutput.format(f);
 }
 
 function validateCommonParameters() {
@@ -1573,12 +1994,16 @@ function writeStartBlocks(isRequired, code) {
   skipBlocks = saveSkipBlocks; // restore skipBlocks value
 }
 
-var pendingRadiusCompensation = -1;
+// FluidNC has no cutter radius compensation. G41 and G42 are not in its
+// gcode parser at all, and G40 is accepted only as a no-op -- "Not required
+// since cutter radius compensation is always disabled. Only here to support
+// G40 commands that often appear in g-code program headers". So this refuses
+// outright, and records no pending state, which is what lets every
+// compensation branch below go.
 function onRadiusCompensation() {
-  pendingRadiusCompensation = radiusCompensation;
-  if (pendingRadiusCompensation >= 0 && !getSetting("supportsRadiusCompensation", true)) {
-    error(localize("Radius compensation mode is not supported."));
-    return;
+  if (radiusCompensation >= 0) {
+    error(localize("Radius compensation is not supported: FluidNC has no G41/G42. " +
+      "Set the operation's compensation type to 'In computer'."));
   }
 }
 
@@ -1598,9 +2023,6 @@ function forceModals() {
       "gFeedModeModal",
       "feedOutput"
     ];
-    if (operationNeedsSafeStart && (typeof currentSection != "undefined" && currentSection.isMultiAxis())) {
-      modals.push("fourthAxisClamp", "fifthAxisClamp", "sixthAxisClamp");
-    }
     for (var i = 0; i < modals.length; ++i) {
       if (typeof this[modals[i]] != "undefined") {
         this[modals[i]].reset();
@@ -1731,10 +2153,6 @@ function getRetractParameters() {
     singleLine: singleLine};
 }
 
-/** Returns true when subprogram logic does exist into the post. */
-function subprogramsAreSupported() {
-  return typeof subprogramState != "undefined";
-}
 
 // Start of machine simulation connection move support
 var debugSimulation = false; // enable to output debug information for connection move support in the NC program
@@ -1899,13 +2317,210 @@ function machineSimulation(parameters) {
   }
 }
 // <<<<< INCLUDED FROM include_files/commonFunctions.cpi
+
+// ===========================================================================
+// ATC TOOL CHANGE -- MACHINE SIMULATION
+// ===========================================================================
+// The NC file only ever says "Tn M6"; the rack moves live inside the ATC's
+// own macro, so Fusion's machine simulation has nothing to follow and the
+// tool simply teleports. That hides exactly the moves most likely to hit
+// something: a long tool traversing the table, and the rack entry/exit.
+//
+// machineSimulation() writes to the SIMULATION STREAM, not to the program.
+// So the real path can be replayed for collision checking without a single
+// extra line appearing in the output. Outside simulation every call here
+// returns immediately, so this costs nothing on a normal post.
+//
+// KEEP IN SYNC WITH THE atc_custom: BLOCK IN config.yaml. These are the same
+// numbers; nothing reads them from the machine.
+// ===========================================================================
+var atcGeometry = {
+  safeZ          : 0,        // move_to_safe_z() is G53 G0 Z0
+  firstToolNumber: 2,        // first_tool_number -- slot 1 holds T2
+  slots          : [         // slot1_mpos_mm .. slot6_mpos_mm
+    {x:  -1.100, y: -487.0, z: -176.0},  // T2
+    {x:-100.200, y: -489.0, z: -174.5},  // T3
+    {x:-198.100, y: -489.0, z: -173.1},  // T4
+    {x:-283.800, y: -489.0, z: -172.8},  // T5
+    {x:-380.000, y: -489.0, z: -172.9},  // T6
+    {x:-477.200, y: -489.0, z: -172.3}   // T7
+  ],
+  holderPulloff  : {x:0, y:35.0, z:15.0}, // tool_holder_pulloff_mm
+  ets            : {x: -22.400, y: -22.000, z: -294.0}, // ets_mpos_mm
+  etsRapidZOffset: 10.0      // ets_rapid_z_offset_mm
+};
+
+// What the spindle had in it last. -1 means unknown, which is the honest
+// state at program start -- the ATC remembers across power cycles but Fusion
+// cannot know, so the first change skips the drop and only shows the pick.
+var atcSimulatedTool = -1;
+
+function atcSlotIndex(toolNumber) {
+  var i = toolNumber - atcGeometry.firstToolNumber;
+  return (i >= 0 && i < atcGeometry.slots.length) ? i : -1;
+}
+
+// Drop the tool currently in the spindle back into its fork. Mirrors
+// Every position in atcGeometry is a MACHINE coordinate -- they are the
+// mpos values out of config.yaml, and the ATC drives to them with G53. So
+// every one of these has to go in as coordinates:MACHINE. Two things go
+// wrong without it:
+//
+//   1. machineSimulation() falls through to moveToTargetInWorkCoords(),
+//      which the simulation API counts as a WCS ACTIVATION. Once one has
+//      happened in a connection, performToolChangeCycle() is refused with
+//      "A tool change was requested via the simulation API when a tool
+//      change or WCS activation has already occurred earlier in the
+//      connection" -- which is what the rack replay was doing to itself.
+//   2. The rack would be drawn at the work offset instead of where it
+//      physically is, so the collision check -- the entire point of the
+//      replay -- would be checking the wrong piece of table.
+//
+// feed defaults to false as well. machineSimulation() otherwise infers it
+// from gMotionModal, so a rack rapid would be simulated as a feed move
+// whenever G1 happened to be modal when the tool change landed.
+function atcSimMove(p) {
+  p.coordinates = MACHINE;
+  if (p.feed === undefined) {
+    p.feed = false;
+  }
+  machineSimulation(p);
+}
+
+// Custom_ATC::drop_tool(): approach at the pull-off Y, descend to holder
+// height, slide IN along Y, then lift off the taper.
+function atcSimDrop(slot) {
+  var s = atcGeometry.slots[slot];
+  var p = atcGeometry.holderPulloff;
+  atcSimMove({z:atcGeometry.safeZ});
+  atcSimMove({x:s.x, y:s.y + p.y});
+  atcSimMove({z:s.z});
+  atcSimMove({y:s.y});          // into the fork
+  atcSimMove({z:s.z + p.z});    // lift off the taper
+  atcSimMove({z:atcGeometry.safeZ});
+}
+
+// Mirrors Custom_ATC::pick_tool(): position over the holder while it sits in
+// the fork, descend onto the taper (a G1, hence feed), then slide OUT along
+// Y before retracting.
+function atcSimPick(slot) {
+  var s = atcGeometry.slots[slot];
+  var p = atcGeometry.holderPulloff;
+  atcSimMove({z:atcGeometry.safeZ});
+  atcSimMove({x:s.x, y:s.y});
+  atcSimMove({z:s.z + p.z});
+  atcSimMove({z:s.z, feed:1000});  // G53 G1 Z.. F1000 onto the taper
+  atcSimMove({y:s.y + p.y});       // out of the fork
+  atcSimMove({z:atcGeometry.safeZ});
+}
+
+// Mirrors move_over_toolsetter() plus stage 1 of probe_toolsetter(). The
+// descent uses this tool's body length, the same quantity the post already
+// hands the firmware as #<_fusion_tool_gauge>, so a long tool is shown
+// descending less far -- which is the point of watching it.
+// move_to_safe_z() + move_over_toolsetter(). This is where the operator takes
+// a tool out or puts one in, and where anything that needs measuring gets
+// measured. Ends at safe Z over the setter.
+function atcSimParkOverToolsetter() {
+  atcSimMove({z:atcGeometry.safeZ});
+  atcSimMove({x:atcGeometry.ets.x, y:atcGeometry.ets.y});
+}
+
+// Stage 1 of probe_toolsetter(): descend by this tool's body length -- the
+// same quantity the post hands the firmware as #<_fusion_tool_gauge> -- then
+// back to safe Z. A long tool is shown descending less far, which is the
+// point of watching it. Assumes the probe is already parked over the setter.
+function atcSimProbeToolsetter(bodyLength) {
+  atcSimMove({z:atcGeometry.ets.z + atcGeometry.etsRapidZOffset + bodyLength});
+  atcSimMove({z:atcGeometry.safeZ});
+}
+
+// Replays the whole change: the drop, the pick and the toolsetter stage.
+// This replay deliberately does NOT ask for mode:TOOLCHANGE anywhere.
+//
+// Fusion performs the tool change itself when it processes the toolpath, and
+// performToolChangeCycle() is allowed once per connection -- so the post
+// asking for a second one fails with "A tool change was requested via the
+// simulation API when a tool change or WCS activation has already occurred
+// earlier in the connection", wherever in the sequence it is put and whether
+// the surrounding moves are in work or machine coordinates.
+//
+// The cost is only WHEN the model swaps: Fusion does it at its own moment
+// rather than at the instant the drawbar closes, so part of the rack path
+// may be drawn holding the wrong tool. The path itself -- which is what the
+// replay exists to collision-check -- is unaffected.
+function atcSimulateToolChange(newTool, bodyLength) {
+  if (!SIMULATE_ATC_MOVES) {
+    atcSimulatedTool = newTool; // no path drawn; Fusion swaps the tool as usual
+    return;
+  }
+  var oldSlot = (atcSimulatedTool >= 0) ? atcSlotIndex(atcSimulatedTool) : -1;
+  var newSlot = atcSlotIndex(newTool);
+
+  // ---- put the old tool away ----
+  if (oldSlot >= 0) {
+    atcSimDrop(oldSlot);              // rack tool goes back to its own pocket
+  } else if (atcSimulatedTool > 0) {
+    atcSimParkOverToolsetter();       // anything else: the operator takes it out
+  }
+  // atcSimulatedTool < 0 means the spindle is assumed empty, so nothing to
+  // put away. That is the honest state at program start: the firmware
+  // remembers _prev_tool across power cycles, Fusion cannot.
+
+  // ---- get the new tool ----
+  if (newSlot >= 0) {
+    // Rack tool. pick_tool() then apply_tlo_from_gauge() -- the pocket's
+    // gauge length is already stored, so there is NO touch-off and the next
+    // thing that happens is cutting. (The firmware does probe a pocket the
+    // very first time it is used, but whether a gauge is stored is firmware
+    // state the post cannot see, so the normal case is what gets drawn.)
+    atcSimPick(newSlot);
+  } else {
+    atcSimParkOverToolsetter();       // the operator installs it here, on M0
+    if (newTool != PROBE_TOOL) {
+      // Everything outside the rack is touched off -- no gauge is stored for
+      // them. T1 is the exception: the probe carries a fixed, manually
+      // entered gauge length and is never touched off.
+      atcSimProbeToolsetter(bodyLength);
+    }
+  }
+
+  atcSimulatedTool = newTool;
+}
+
 // >>>>> INCLUDED FROM include_files/defineMachine.cpi
 function defineMachine() {
   var useTCP = true;
-  if (false) { // note: setup your machine here
-    var aAxis = createAxis({coordinate:0, table:true, axis:[1, 0, 0], range:[-120, 120], preference:1, tcp:useTCP});
-    var cAxis = createAxis({coordinate:2, table:true, axis:[0, 0, 1], range:[-360, 360], preference:0, tcp:useTCP});
-    machineConfiguration = new MachineConfiguration(aAxis, cAxis);
+  // Overriding the machine configuration is what makes Fusion say "Machine
+  // configuration is overridden by the post script" and refuse to simulate
+  // with the machine: the kinematics it would simulate against have been
+  // replaced by ones it cannot see. So when a setup has a machine selected,
+  // use it, and keep the built-in definition below as the fallback for a
+  // setup with no machine. validateMachineDefinition() in onOpen then checks
+  // the selected one actually describes this machine, because a definition
+  // that is missing the B axis or has TCP off would quietly change what gets
+  // posted rather than failing.
+  usingFusionMachine = receivedMachineConfiguration &&
+    MACHINE_CONFIG_SOURCE == "fusion";
+  if (!usingFusionMachine) {
+    // B rotary on the TABLE, axis along machine Y, carrying the part.
+    //
+    // table:true is not cosmetic. It tells Fusion the PART rotates rather
+    // than the head, which decides which side of the cut gets compensated.
+    //
+    // tcp:true is what makes tcp.isSupportedByMachine true, which stops
+    // Fusion baking the pivot geometry into the posted XYZ. That is the
+    // whole point: the firmware does it instead, from a measured pivot and
+    // a measured axis vector.
+    //
+    // axis:[0,1,0] stays NOMINAL on purpose. The real axis is tilted about
+    // 0.11 deg and TCPCartesian compensates it from its own measurement.
+    // Putting the measured tilt here as well would apply it twice. Fusion
+    // only needs this for reach and limit checking.
+    //
+    // The rotary does not home, so its range is unlimited.
+    var bAxis = createAxis({coordinate:1, table:true, axis:[0, 1, 0], cyclic:true, preference:0, tcp:useTCP});
+    machineConfiguration = new MachineConfiguration(bAxis);
 
     setMachineConfiguration(machineConfiguration);
     if (receivedMachineConfiguration) {
@@ -1920,19 +2535,9 @@ function defineMachine() {
       machineConfiguration.setVirtualTooltip(false); // translate the pivot point to the virtual tool tip for nonTCP rotary heads
     }
 
-    // retract / reconfigure
-    var performRewinds = false; // set to true to enable the rewind/reconfigure logic
-    if (performRewinds) {
-      machineConfiguration.enableMachineRewinds(); // enables the retract/reconfigure logic
-      safeRetractDistance = (unit == IN) ? 1 : 25; // additional distance to retract out of stock, can be overridden with a property
-      safeRetractFeed = (unit == IN) ? 20 : 500; // retract feed rate
-      safePlungeFeed = (unit == IN) ? 10 : 250; // plunge feed rate
-      machineConfiguration.setSafeRetractDistance(safeRetractDistance);
-      machineConfiguration.setSafeRetractFeedrate(safeRetractFeed);
-      machineConfiguration.setSafePlungeFeedrate(safePlungeFeed);
-      var stockExpansion = new Vector(toPreciseUnit(0.1, IN), toPreciseUnit(0.1, IN), toPreciseUnit(0.1, IN)); // expand stock XYZ values
-      machineConfiguration.setRewindStockExpansion(stockExpansion);
-    }
+    // Retract/reconfigure (rewind) is left to the machine definition: with a
+    // machine selected, activateMachine reads performRewinds() from it, so a
+    // local flag here would not have disabled anything either way.
 
     // multi-axis feedrates
     if (machineConfiguration.isMultiAxisConfiguration()) {
@@ -1945,11 +2550,6 @@ function defineMachine() {
       );
       setMachineConfiguration(machineConfiguration);
     }
-
-    /* home positions */
-    // machineConfiguration.setHomePositionX(toPreciseUnit(0, IN));
-    // machineConfiguration.setHomePositionY(toPreciseUnit(0, IN));
-    // machineConfiguration.setRetractPlane(toPreciseUnit(0, IN));
   }
 }
 // <<<<< INCLUDED FROM include_files/defineMachine.cpi
@@ -1976,7 +2576,6 @@ function defineWorkPlane(_section, _setWorkPlane) {
 
     if (_setWorkPlane) {
       if (_section.isMultiAxis() || isPolarModeActive()) { // 4-5x simultaneous operations
-        cancelWorkPlane();
         if (_section.isOptimizedForMachine()) {
           positionABC(abc, true);
         } else {
@@ -2172,9 +2771,6 @@ function getCoolantCodes(coolant, format) {
 // >>>>> INCLUDED FROM include_files/writeWCS.cpi
 function writeWCS(section, wcsIsRequired) {
   if (section.workOffset != currentWorkOffset) {
-    if (getSetting("workPlaneMethod.cancelTiltFirst", false) && wcsIsRequired) {
-      cancelWorkPlane();
-    }
     if (typeof forceWorkPlane == "function" && wcsIsRequired) {
       forceWorkPlane();
     }
@@ -2209,7 +2805,7 @@ function writeToolCall(tool, insertToolCall) {
 
     if (tool.manualToolChange) {
       onCommand(COMMAND_STOP);
-      writeComment("MANUAL TOOL CHANGE TO T" + toolFormat.format(tool.number));
+      writeComment("MANUAL TOOL CHANGE TO T" + toolFormat.format(mapTool(tool.number)));
     } else {
       if (!isFirstSection() && getProperty("optionalStop") && insertToolCall) {
         onCommand(COMMAND_OPTIONAL_STOP);
@@ -2238,113 +2834,98 @@ function startSpindle(tool, insertToolCall) {
 }
 // <<<<< INCLUDED FROM include_files/startSpindle.cpi
 // >>>>> INCLUDED FROM include_files/writeProgramHeader.cpi
-properties.writeMachine = {
-  title      : "Write machine",
-  description: "Output the machine settings in the header of the program.",
-  group      : "formats",
-  type       : "boolean",
-  value      : true,
-  scope      : "post"
-};
-properties.writeTools = {
-  title      : "Write tool list",
-  description: "Output a tool list in the header of the program.",
-  group      : "formats",
-  type       : "boolean",
-  value      : true,
-  scope      : "post"
-};
 function writeProgramHeader() {
-  // dump machine configuration
-  var vendor = machineConfiguration.getVendor();
-  var model = machineConfiguration.getModel();
-  var mDescription = machineConfiguration.getDescription();
-  if (getProperty("writeMachine") && (vendor || model || mDescription)) {
-    writeComment(localize("Machine"));
-    if (vendor) {
-      writeComment("  " + localize("vendor") + ": " + vendor);
-    }
-    if (model) {
-      writeComment("  " + localize("model") + ": " + model);
-    }
-    if (mDescription) {
-      writeComment("  " + localize("description") + ": " + mDescription);
-    }
+  writeComment("posted " + postedAtText());
+
+  writeln("");
+  writeComment("OPERATIONS");
+  for (var i = 0; i < getNumberOfSections(); ++i) {
+    var name = getSection(i).getParameter("operation-comment", "");
+    writeComment("  " + (i + 1) + "  " + (name ? name : "unnamed"));
   }
 
-  // dump tool information
-  if (getProperty("writeTools")) {
-    if (false) { // set to true to use the post kernel version of the tool list
-      writeToolTable(TOOL_NUMBER_COL);
-    } else {
-      var zRanges = {};
-      if (is3D()) {
-        var numberOfSections = getNumberOfSections();
-        for (var i = 0; i < numberOfSections; ++i) {
-          var section = getSection(i);
-          var zRange = section.getGlobalZRange();
-          var tool = section.getTool();
-          if (zRanges[tool.number]) {
-            zRanges[tool.number].expandToRange(zRange);
-          } else {
-            zRanges[tool.number] = zRange;
-          }
-        }
-      }
-      var tools = getToolTable();
-      if (tools.getNumberOfTools() > 0) {
-        for (var i = 0; i < tools.getNumberOfTools(); ++i) {
-          var tool = tools.getTool(i);
-          var comment = (getProperty("toolAsName") ? "\"" + tool.description.toUpperCase() + "\"" : "T" + toolFormat.format(tool.number)) + " " +
-          "D=" + xyzFormat.format(tool.diameter) + " " +
-          localize("CR") + "=" + xyzFormat.format(tool.cornerRadius);
-          if ((tool.taperAngle > 0) && (tool.taperAngle < Math.PI)) {
-            comment += " " + localize("TAPER") + "=" + taperFormat.format(tool.taperAngle) + localize("deg");
-          }
-          if (zRanges[tool.number]) {
-            comment += " - " + localize("ZMIN") + "=" + xyzFormat.format(zRanges[tool.number].getMinimum());
-          }
-          comment += " - " + getToolTypeName(tool.type);
-          writeComment(comment);
-        }
-      }
+  writeln("");
+  writeComment("TOOLS");
+  var tools = getToolTable();
+  for (var i = 0; i < tools.getNumberOfTools(); ++i) {
+    writeToolSummary(tools.getTool(i), "  ");
+  }
+
+  // Only when the numbers in this file differ from the ones in Fusion. The
+  // operator is loading tools by hand here, so the mapping is the difference
+  // between loading the right tool and the wrong one.
+  if (noAtcMachine && toolRenumberList.length) {
+    writeln("");
+    writeComment("TOOL NUMBERS DIFFER FROM FUSION - no changer on this machine");
+    for (var i = 0; i < toolRenumberList.length; ++i) {
+      writeComment("  Fusion T" + toolRenumberList[i][0] +
+        "  ->  load as T" + toolRenumberList[i][1]);
     }
+  }
+}
+
+// Local time, to the minute. Which file is on the machine is a question that
+// comes up at the machine, so the stamp is in the header rather than only in
+// the file system.
+function postedAtText() {
+  var d = new Date();
+  function pad(n) {
+    return (n < 10 ? "0" : "") + n;
+  }
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+    " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+}
+
+function toolName(tool) {
+  return String(tool.description || tool.comment || getToolTypeName(tool.type));
+}
+
+function toolHolderName(tool) {
+  return String(tool.holderDescription || tool.holderComment ||
+    tool.holderProductId || "");
+}
+
+// How far the tool stands out past the nose of its holder. Fusion gives the
+// assembly gauge length -- spindle gauge line to tool tip, which is what
+// getBodyLength() returns and what the ATC is handed as
+// #<_fusion_tool_gauge> -- and the holder's own length is measured from the
+// same gauge line, so the difference is the part sticking out.
+function toolStickout(tool) {
+  var gauge = getBodyLength(tool);
+  var holder = tool.holderLength;
+  return (gauge > 0 && holder > 0 && gauge > holder) ? (gauge - holder) : undefined;
+}
+
+// One tool, two lines. Shared by the header and the manual-change comment so
+// the operator reads the same description in both places.
+function writeToolSummary(tool, indent) {
+  var posted = mapTool(tool.number);
+  writeComment(indent + "T" + toolFormat.format(posted) +
+    (posted != tool.number ? " (Fusion T" + tool.number + ")" : "") +
+    "  " + toolName(tool));
+  var detail = "";
+  var stickout = toolStickout(tool);
+  if (stickout !== undefined) {
+    detail = "stickout " + xyzFormat.format(stickout);
+  }
+  var holder = toolHolderName(tool);
+  if (holder) {
+    detail += (detail ? "  " : "") + "in " + holder;
+  }
+  if (detail) {
+    writeComment(indent + "    " + detail);
   }
 }
 // <<<<< INCLUDED FROM include_files/writeProgramHeader.cpi
 
 // >>>>> INCLUDED FROM include_files/workPlaneFunctions_fanuc.cpi
-var gRotationModal = createOutputVariable({current : 69,
-  onchange: function () {
-    state.twpIsActive = gRotationModal.getCurrent() != 69;
-    if (typeof probeVariables != "undefined") {
-      probeVariables.outputRotationCodes = probeVariables.probeAngleMethod == "G68";
-    }
-    machineSimulation({}); // update machine simulation TWP state
-  }}, gFormat);
-
+// No G68/G69 in FluidNC, so there is no work-plane rotation to cancel and
+// gRotationModal, cancelWorkPlane() and cancelWCSRotation() are all gone with
+// it. forceWorkPlane() stays: it is how an indexing move is forced to be
+// re-emitted, which has nothing to do with rotation codes.
 var currentWorkPlaneABC = undefined;
 function forceWorkPlane() {
   currentWorkPlaneABC = undefined;
-}
-
-function cancelWCSRotation() {
-  if (typeof gRotationModal != "undefined" && gRotationModal.getCurrent() == 68) {
-    cancelWorkPlane(true);
-  }
-}
-
-function cancelWorkPlane(force) {
-  if (typeof gRotationModal != "undefined") {
-    if (force) {
-      gRotationModal.reset();
-    }
-    var command = gRotationModal.format(69);
-    if (command) {
-      writeBlock(command); // cancel frame
-      forceWorkPlane();
-    }
-  }
 }
 
 function setWorkPlane(abc) {
@@ -2364,29 +2945,10 @@ function setWorkPlane(abc) {
     if (typeof cancelLengthCompensation == "function") {
       cancelLengthCompensation(); // cancel tool lenght compensation / TCP prior to output TWP
     }
-    if (settings.workPlaneMethod.useTiltedWorkplane) {
-      onCommand(COMMAND_UNLOCK_MULTI_AXIS);
-      cancelWorkPlane();
-      if (machineConfiguration.isMultiAxisConfiguration()) {
-        var machineABC = abc.isNonZero() ? (currentSection.isMultiAxis() ? getCurrentDirection() : getWorkPlaneMachineABC(currentSection, false)) : abc;
-        if (settings.workPlaneMethod.useABCPrepositioning || machineABC.isZero()) {
-          positionABC(machineABC);
-        } else {
-          setCurrentABC(machineABC);
-        }
-      }
-      if (abc.isNonZero() || !machineConfiguration.isMultiAxisConfiguration()) {
-        gRotationModal.reset();
-        writeBlock(
-          gRotationModal.format(68.2), "X" + xyzFormat.format(currentSection.workOrigin.x), "Y" + xyzFormat.format(currentSection.workOrigin.y), "Z" + xyzFormat.format(currentSection.workOrigin.z),
-          "I" + abcFormat.format(abc.x), "J" + abcFormat.format(abc.y), "K" + abcFormat.format(abc.z)
-        ); // set frame
-        writeBlock(gFormat.format(53.1)); // turn machine
-        machineSimulation({a:getCurrentABC().x, b:getCurrentABC().y, c:getCurrentABC().z, coordinates:MACHINE, eulerAngles:abc});
-      }
-    } else {
-      positionABC(abc, true);
-    }
+    // Tilted workplane (G68.2 + G53.1) is not an option here: FluidNC's
+    // gcode parser has no G68 and no G69 at all, so the part is indexed by
+    // rotating the axis and nothing else.
+    positionABC(abc, true);
     if (!currentSection.isMultiAxis()) {
       onCommand(COMMAND_LOCK_MULTI_AXIS);
     }
@@ -2417,7 +2979,6 @@ function writeInitialPositioning(position, isRequired, codes1, codes2) {
     break;
   }
   var feed = (highFeedMapping != HIGH_FEED_NO_MAPPING) ? getFeed(highFeedrate) : "";
-  var hOffset = getSetting("outputToolLengthOffset", true) ? hFormat.format(tool.lengthOffset) : "";
   var additionalCodes = [formatWords(codes1), formatWords(codes2)];
 
   forceModals(gMotionModal);
@@ -2427,76 +2988,27 @@ function writeInitialPositioning(position, isRequired, codes1, codes2) {
       cancelLengthCompensation(!isRequired); // cancel tool length compensation prior to enabling it, required when switching G43/G43.4 modes
     }
 
-    if (machineConfiguration.isHeadConfiguration()) { // head/head head/table kinematics
-      cancelTransformation();
-      var machineABC = currentSection.isMultiAxis() ? defineWorkPlane(currentSection, false) : getWorkPlaneMachineABC(currentSection, false);
-      machineConfiguration.setToolLength(getSetting("workPlaneMethod.compensateToolLength", false) ? getBodyLength(currentSection.getTool()) : 0); // define the tool length for head adjustments
-      var mode = currentSection.isOptimizedForMachine() ? TCP_XYZ_OPTIMIZED : TCP_XYZ;
-      var globalPosition = getGlobalPosition(currentSection.getInitialPosition());
-      var machinePosition = machineConfiguration.getOptimizedPosition(globalPosition, machineABC, mode, OPTIMIZE_BOTH, true);
-      var prePosition = (currentSection.isOptimizedForMachine() || currentSection.isMultiAxis()) ? position :
-        (settings.workPlaneMethod.useTiltedWorkplane && !tcp.isSupportedByMachine) ? machinePosition : globalPosition;
+    // One path only. The head-configuration branch is gone because this B
+    // axis is on the table, and the tilted-workplane preposition branch is
+    // gone because FluidNC has no G68.
+    // Put the frame in place BEFORE positioning: with TCP on, the XYZ
+    // below is the tool tip in the part frame, not a machine position.
+    //
+    // This is explicit because the kernel's usual mechanism cannot work
+    // here. Normally TCP rides along with the length-compensation code --
+    // G43.4 instead of G43 -- and lengthCompOutput's onchange handler sets
+    // state.tcpIsActive from it. But this machine's ATC owns the tool
+    // length and issues its own G43.1, so outputToolLengthCompensation is
+    // false, which makes getLengthCompCode() disable lengthCompOutput and
+    // return an empty string. Nothing is emitted, the handler never fires,
+    // and M128 never went out at all: the post was relying on whatever
+    // mode the controller happened to be left in.
+    setTCP(tcp.isSupportedByOperation);
+    writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(position.x), yOutput.format(position.y), feed, additionalCodes[0]);
+    machineSimulation({x:position.x, y:position.y});
+    writeBlock(gMotionModal.format(motionCode.single), getLengthCompCode(), zOutput.format(position.z), additionalCodes[1]);
+    machineSimulation(tcp.isSupportedByOperation ? {x:position.x, y:position.y, z:position.z} : {z:position.z});
 
-      cancelWorkPlane();
-      positionABC(machineABC);
-      if ((getSetting("workPlaneMethod.useTiltedWorkplane", false) && tcp.isSupportedByMachine && getCurrentDirection().isNonZero()) || tcp.isSupportedByOperation) {
-        setTCP(true, true); // force TCP for prepositioning although the operation may not require it
-      }
-      writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(prePosition.x), yOutput.format(prePosition.y), feed, additionalCodes[0]);
-      machineSimulation({x:prePosition.x, y:prePosition.y});
-      if (currentSection.isMultiAxis() || getSetting("headPositioningMethod", 0) == 1) {
-        var lengthComp = state.lengthCompensationActive ? {code:undefined, hOffset:undefined} : {code:getLengthCompCode(), hOffset:hOffset};
-        writeBlock(modalCodes, gMotionModal.format(motionCode.single), lengthComp.code, zOutput.format(prePosition.z), lengthComp.hOffset, additionalCodes[1]);
-        machineSimulation({z:prePosition.z});
-      }
-
-      if (!currentSection.isMultiAxis()) {
-        if (state.tcpIsActive && !tcp.isSupportedByOperation && typeof setTCP == "function") {
-          setTCP(false);
-        }
-        if (getSetting("workPlaneMethod.useTiltedWorkplane", false) && getCurrentDirection().isNonZero()) {
-          var saveRetractedState = [state.retractedX, state.retractedY, state.retractedZ];
-          state.retractedX = state.retractedY = state.retractedZ = true; // set retracted states to true to avoid retraction
-          defineWorkPlane(currentSection, true); // apply workplane for the operation if TWP is supported
-          [state.retractedX, state.retractedY, state.retractedZ] = saveRetractedState; // restore retracted states
-        }
-        if (!state.lengthCompensationActive) {
-          if (state.twpIsActive) {
-            forceXYZ();
-          }
-          if (getSetting("headPositioningMethod", 0) == 1) {
-            writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(position.x), yOutput.format(position.y));
-            machineSimulation({x:position.x, y:position.y});
-            writeBlock(modalCodes, gMotionModal.format(motionCode.single), getLengthCompCode(), zOutput.format(position.z), hOffset);
-            machineSimulation({z:position.z});
-          } else {
-            writeBlock(modalCodes, getLengthCompCode(), gMotionModal.format(motionCode.single), xOutput.format(position.x), yOutput.format(position.y), zOutput.format(position.z), hOffset);
-            machineSimulation({x:position.x, y:position.y, z:position.z});
-          }
-        }
-      }
-      forceFeed();
-    } else {
-      // multi axis prepositioning with TWP
-      if (currentSection.isMultiAxis() && getSetting("workPlaneMethod.prepositionWithTWP", true) && getSetting("workPlaneMethod.useTiltedWorkplane", false) &&
-        tcp.isSupportedByOperation && getCurrentDirection().isNonZero()) {
-        var W = machineConfiguration.isMultiAxisConfiguration() ? machineConfiguration.getOrientation(getCurrentDirection()) :
-          Matrix.getOrientationFromDirection(getCurrentDirection());
-        var prePosition = W.getTransposed().multiply(position);
-        var angles = W.getEuler2(settings.workPlaneMethod.eulerConvention);
-        setWorkPlane(angles);
-        writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(prePosition.x), yOutput.format(prePosition.y), feed, additionalCodes);
-        machineSimulation({x:prePosition.x, y:prePosition.y});
-        cancelWorkPlane();
-        setTCP(true); // omit Z-axis output is desired
-        forceAny(); // required to output XYZ coordinates in the following line
-      } else {
-        writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(position.x), yOutput.format(position.y), feed, additionalCodes[0]);
-        machineSimulation({x:position.x, y:position.y});
-        writeBlock(gMotionModal.format(motionCode.single), getLengthCompCode(), zOutput.format(position.z), hOffset, additionalCodes[1]);
-        machineSimulation(tcp.isSupportedByOperation ? {x:position.x, y:position.y, z:position.z} : {z:position.z});
-      }
-    }
     forceModals(gMotionModal);
     if (isRequired) {
       additionalCodes = []; // clear additionalCodes buffer
@@ -2519,19 +3031,6 @@ function writeInitialPositioning(position, isRequired, codes1, codes2) {
   }
 }
 
-Matrix.getOrientationFromDirection = function (ijk) {
-  var forward = ijk;
-  var unitZ = new Vector(0, 0, 1);
-  var W;
-  if (Math.abs(Vector.dot(forward, unitZ)) < 0.5) {
-    var imX = Vector.cross(forward, unitZ).getNormalized();
-    W = new Matrix(imX, Vector.cross(forward, imX), forward);
-  } else {
-    var imX = Vector.cross(new Vector(0, 1, 0), forward).getNormalized();
-    W = new Matrix(imX, Vector.cross(forward, imX), forward);
-  }
-  return W;
-};
 // <<<<< INCLUDED FROM include_files/initialPositioning_fanuc.cpi
 // >>>>> INCLUDED FROM include_files/onRapid_fanuc.cpi
 function onRapid(_x, _y, _z) {
@@ -2540,10 +3039,6 @@ function onRapid(_x, _y, _z) {
   var y = yOutput.format(_y);
   var z = zOutput.format(_z);
   if (x || y || z) {
-    if (pendingRadiusCompensation >= 0) {
-      error(localize("Radius compensation mode cannot be changed at rapid traversal."));
-      return;
-    }
     writeBlock(gMotionModal.format(0), x, y, z);
     forceFeed();
   }
@@ -2552,32 +3047,12 @@ function onRapid(_x, _y, _z) {
 // >>>>> INCLUDED FROM include_files/onLinear_fanuc.cpi
 function onLinear(_x, _y, _z, feed) {
   updateAdaptiveFeedForMovement();
-  if (pendingRadiusCompensation >= 0) {
-    xOutput.reset();
-    yOutput.reset();
-  }
   var x = xOutput.format(_x);
   var y = yOutput.format(_y);
   var z = zOutput.format(_z);
   var f = getFeed(feed);
   if (x || y || z) {
-    if (pendingRadiusCompensation >= 0) {
-      pendingRadiusCompensation = -1;
-      var d = getSetting("outputToolDiameterOffset", true) ? diameterOffsetFormat.format(tool.diameterOffset) : "";
-      writeBlock(gPlaneModal.format(17));
-      switch (radiusCompensation) {
-      case RADIUS_COMPENSATION_LEFT:
-        writeBlock(gMotionModal.format(1), gFormat.format(41), x, y, z, d, f);
-        break;
-      case RADIUS_COMPENSATION_RIGHT:
-        writeBlock(gMotionModal.format(1), gFormat.format(42), x, y, z, d, f);
-        break;
-      default:
-        writeBlock(gMotionModal.format(1), gFormat.format(40), x, y, z, f);
-      }
-    } else {
-      writeBlock(gMotionModal.format(1), x, y, z, f);
-    }
+    writeBlock(gMotionModal.format(1), x, y, z, f);
   } else if (f) {
     if (getNextRecord().isMotion()) { // try not to output feed without motion
       forceFeed(); // force feed on next line
@@ -2590,19 +3065,15 @@ function onLinear(_x, _y, _z, feed) {
 // >>>>> INCLUDED FROM include_files/onRapid5D_fanuc.cpi
 function onRapid5D(_x, _y, _z, _a, _b, _c) {
   updateAdaptiveFeedForMovement();
-  if (pendingRadiusCompensation >= 0) {
-    error(localize("Radius compensation mode cannot be changed at rapid traversal."));
-    return;
-  }
-  if (!currentSection.isOptimizedForMachine()) {
-    forceXYZ();
-  }
+  // Tool vector output (I/J/K instead of ABC) is for controls that accept a
+  // tool vector; FluidNC does not, and a non-optimised multi-axis section is
+  // refused outright in activateMachine.
   var x = xOutput.format(_x);
   var y = yOutput.format(_y);
   var z = zOutput.format(_z);
-  var a = currentSection.isOptimizedForMachine() ? aOutput.format(_a) : toolVectorOutputI.format(_a);
-  var b = currentSection.isOptimizedForMachine() ? bOutput.format(_b) : toolVectorOutputJ.format(_b);
-  var c = currentSection.isOptimizedForMachine() ? cOutput.format(_c) : toolVectorOutputK.format(_c);
+  var a = aOutput.format(_a);
+  var b = bOutput.format(_b);
+  var c = cOutput.format(_c);
 
   if (x || y || z || a || b || c) {
     writeBlock(gMotionModal.format(0), x, y, z, a, b, c);
@@ -2613,24 +3084,20 @@ function onRapid5D(_x, _y, _z, _a, _b, _c) {
 // >>>>> INCLUDED FROM include_files/onLinear5D_fanuc.cpi
 function onLinear5D(_x, _y, _z, _a, _b, _c, feed, feedMode) {
   updateAdaptiveFeedForMovement();
-  if (pendingRadiusCompensation >= 0) {
-    error(localize("Radius compensation cannot be activated/deactivated for 5-axis move."));
-    return;
-  }
-  if (!currentSection.isOptimizedForMachine()) {
-    forceXYZ();
-  }
+  // Tool vector output (I/J/K instead of ABC) is for controls that accept a
+  // tool vector; FluidNC does not, and a non-optimised multi-axis section is
+  // refused outright in activateMachine.
   var x = xOutput.format(_x);
   var y = yOutput.format(_y);
   var z = zOutput.format(_z);
-  var a = currentSection.isOptimizedForMachine() ? aOutput.format(_a) : toolVectorOutputI.format(_a);
-  var b = currentSection.isOptimizedForMachine() ? bOutput.format(_b) : toolVectorOutputJ.format(_b);
-  var c = currentSection.isOptimizedForMachine() ? cOutput.format(_c) : toolVectorOutputK.format(_c);
+  var a = aOutput.format(_a);
+  var b = bOutput.format(_b);
+  var c = cOutput.format(_c);
   if (feedMode == FEED_INVERSE_TIME) {
     forceFeed();
   }
   var f = feedMode == FEED_INVERSE_TIME ? inverseTimeOutput.format(feed) : getFeed(feed);
-  var fMode = feedMode == FEED_INVERSE_TIME ? 93 : getProperty("useG95") ? 95 : 94;
+  var fMode = feedMode == FEED_INVERSE_TIME ? 93 : 94;
 
   if (x || y || z || a || b || c) {
     writeBlock(gFeedModeModal.format(fMode), gMotionModal.format(1), x, y, z, a, b, c, f);
@@ -2647,9 +3114,6 @@ function onLinear5D(_x, _y, _z, _a, _b, _c, feed, feedMode) {
 function writeRetract() {
   var retract = getRetractParameters.apply(this, arguments);
   if (retract && retract.words.length > 0) {
-    if (typeof cancelWCSRotation == "function" && getSetting("retract.cancelRotationOnRetracting", false)) { // cancel rotation before retracting
-      cancelWCSRotation();
-    }
     if (typeof setTCP == "function" && getSetting("allowCancelTCPBeforeRetracting", false)) {
       setTCP(false); // cancel TCP before retracting
     }
@@ -2719,11 +3183,20 @@ function setTCP(_tcp, force) {
   if (!force && state.tcpIsActive === _tcp) {
     return;
   }
-  cancelLengthCompensation();
+  // FluidNC has no G43.4 / G43.5. TCP is a modal M-code pair handled by
+  // TCPCartesian, so this writes M128 / M129 instead of a length-comp code.
+  //
+  // Tool length is NOT touched here either. The ATC owns it: the M6 macro
+  // probes the toolsetter and issues its own G43.1. That is also why
+  // outputToolLengthCompensation is false, which leaves lengthCompOutput
+  // disabled and emitting nothing -- so cancelLengthCompensation() is not
+  // called, and G49 never goes out to undo the ATC's work.
+  writeBlock(mFormat.format(_tcp ? 128 : 129));
+  state.tcpIsActive              = _tcp;
+  state.lengthCompensationActive = true; // the ATC always leaves a TLO applied
+  machineSimulation({mode:_tcp ? TCPON : TCPOFF});
   if (_tcp) {
-    var hOffset = getSetting("outputToolLengthOffset", true) ? hFormat.format(tool.lengthOffset) : "";
-    writeBlock(getLengthCompCode(force), hOffset);
-    forceXYZ();
+    forceXYZ(); // the frame just changed; nothing modal survives it
   }
 }
 // <<<<< INCLUDED FROM include_files/lengthCompFunctions_fanuc.cpi
