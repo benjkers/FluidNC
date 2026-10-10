@@ -504,10 +504,12 @@ function validateMachineDefinition() {
     return;
   }
   var problems = [];
-  if (!machineConfiguration.isMultiAxisConfiguration()) {
-    problems.push("it has no rotary axis. Add the B axis in Machine Builder, " +
-      "or set MACHINE_CONFIG_SOURCE to \"post\" in the post.");
-  } else {
+  // A definition with no rotary axis is a perfectly good 3-axis setup, not a
+  // fault: Fusion will not generate an indexed or simultaneous toolpath
+  // against it, activateMachine disables B output, and setWorkPlane returns
+  // without emitting anything. The checks below only have something to say
+  // once a rotary axis actually exists.
+  if (machineConfiguration.isMultiAxisConfiguration()) {
     if (!machineConfiguration.isMachineCoordinate(1)) {
       problems.push("its rotary axis is not B. TCPCartesian compensates a B " +
         "rotary, so set the axis coordinate to B.");
@@ -603,6 +605,27 @@ function writeProgramStart() {
   writeBlock(gAbsIncModal.format(90), gFeedModeModal.format(94));
   writeBlock(gPlaneModal.format(17));
   writeBlock(gUnitModal.format(unit == MM ? 21 : 20));
+
+  // Select the setup's work offset HERE, at the top of the program, rather
+  // than leaving it until partway through the first onSection.
+  //
+  // Two things depend on it. Anything emitted before the first G54 -- a
+  // start-of-program Manual NC, a macro call -- runs with whatever offset
+  // the PREVIOUS program left selected, so "the active one" (G10 ... P0, or
+  // #5220) means the wrong thing. And a reader of the file cannot tell which
+  // offset the program works in without scrolling to the first tool change.
+  //
+  // currentWorkOffset is deliberately NOT set here, so writeWCS emits the
+  // offset a second time at the first operation. That duplicate is the point:
+  // a startup macro called in between can reset the modal state underneath
+  // us. M2/M30 inside a macro run with $SD/Run= does exactly that --
+  //     gc_state.modal.coord_select = CoordIndex::G54;
+  // -- so a program working in G59 would silently continue in G54 from
+  // there on. The first block makes the offset right for anything emitted
+  // early; the second makes it right for the cutting.
+  if (getNumberOfSections() > 0) {
+    writeBlock(getSection(0).wcs);
+  }
   // Assert RPCP off, like G90 and G21 above. M128/M129 is modal in the
   // CONTROLLER and survives the end of a program, but the post only assumes
   // state.tcpIsActive starts false -- so setTCP(false) would write nothing
@@ -2929,7 +2952,14 @@ function forceWorkPlane() {
 }
 
 function setWorkPlane(abc) {
-  if (!settings.workPlaneMethod.forceMultiAxisIndexing && is3D() && !machineConfiguration.isMultiAxisConfiguration()) {
+  // No rotary axis, nothing to orient. This has to come before the kernel's
+  // own guard below, which only applies to a 3D program -- without it a
+  // non-3D program on a 3-axis machine definition falls through to
+  // positionABC(), which errors on a configuration with no rotary.
+  if (!machineConfiguration.isMultiAxisConfiguration()) {
+    return;
+  }
+  if (!settings.workPlaneMethod.forceMultiAxisIndexing && is3D()) {
     return; // ignore
   }
   var workplaneIsRequired = (currentWorkPlaneABC == undefined) ||
@@ -3003,7 +3033,7 @@ function writeInitialPositioning(position, isRequired, codes1, codes2) {
     // return an empty string. Nothing is emitted, the handler never fires,
     // and M128 never went out at all: the post was relying on whatever
     // mode the controller happened to be left in.
-    setTCP(tcp.isSupportedByOperation);
+    setTCP(tcp.isSupportedByMachine && tcp.isSupportedByOperation);
     writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(position.x), yOutput.format(position.y), feed, additionalCodes[0]);
     machineSimulation({x:position.x, y:position.y});
     writeBlock(gMotionModal.format(motionCode.single), getLengthCompCode(), zOutput.format(position.z), additionalCodes[1]);
