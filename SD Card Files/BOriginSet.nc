@@ -82,3 +82,4 @@ G10 L2 P0 X#<_BOrignX> Y#<_BOrignY> Z#<_BOrignZ>
 (so 1 is G54 through 6 for G59.)
 #<_bo_wcs>=#5220
 (PRINT, work origin set in P%.0f#<_bo_wcs>: X %.4f#<_BOrignX> Y %.4f#<_BOrignY> Z %.4f#<_BOrignZ> )
+G4p0.1

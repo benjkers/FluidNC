@@ -1,4 +1,6 @@
-M5
+M5 (Spindle Stop)
+M9 (Coolant Off)
+M129 (TCP Off)
 #<Xtravel>=[#</axes/x/max_travel_mm>]
 #<Ytravel>=[#</axes/y/max_travel_mm>]
 G91 G53 G1 z0 f5000
