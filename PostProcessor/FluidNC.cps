@@ -324,6 +324,7 @@ var SIMULATE_ATC_MOVES = true;
 // Which offset ProbeBLevel.nc writes its angle into. 0 = the active one.
 var B_LEVEL_OFFSET = 0;
 
+
 var PROBE_TOOL = 1;          // atc_custom.h PROBE_TOOL
 var GAUGE_SETTER_TOOL = 100; // atc_custom.h GAUGE_SETTER_TOOL
 
@@ -785,6 +786,9 @@ function onParameter(name, value) {
 // Every probing macro lives in this folder on the SD card.
 var PROBING_DIR = "/Probing/";
 
+// The cycle point of the probe currently being written, set by onCyclePoint.
+var probePoint = undefined;
+
 function runProbeMacro(name) {
   writeBlock("$SD/Run=" + PROBING_DIR + name);
 }
@@ -854,8 +858,26 @@ function writeProbeParams(extra) {
   // part. This replaced a RELATIVE lift, which only cleared a feature that
   // happened to be shorter than the lift -- on a tall boss it left the
   // stylus buried in material.
-  writeBlock("#<_probe_retract_z>=" + xyzFormat.format(cycle.retract !== undefined ? cycle.retract : 0));
-  writeBlock("#<_probe_depth_z>=" + xyzFormat.format(probedSurfaceZ(0)));
+  // The tool axis in the frame being written. The macros move to a HEIGHT
+  // along this rather than along written Z, which is only the tool axis when
+  // nothing is indexed -- see _ToolAxisZ.nc. Straight up on a 3-axis
+  // definition, with TCP disabled, or at B0, so those are unchanged.
+  var probeAxis = machineAxesInFrame().v;
+  writeBlock("#<_probe_axis_ux>=" + xyzFormat.format(probeAxis.x));
+  writeBlock("#<_probe_axis_uy>=" + xyzFormat.format(probeAxis.y));
+  writeBlock("#<_probe_axis_uz>=" + xyzFormat.format(probeAxis.z));
+  // ABSOLUTE heights straight from Fusion, projected on to that axis. They
+  // arrive as written Z values, which carry no orientation: at B90 a plane
+  // of constant written Z is a vertical plane, so two points on one flat
+  // face came through at different "heights". Projecting the POINT makes a
+  // height a height at any angle, and the unknown constant between the
+  // frames cancels because every consumer differences them.
+  var atRetract = new Vector(probePoint ? probePoint.x : 0, probePoint ? probePoint.y : 0,
+    cycle.retract !== undefined ? cycle.retract : 0);
+  var atDepth = new Vector(probePoint ? probePoint.x : 0, probePoint ? probePoint.y : 0,
+    probedSurfaceZ(probePoint ? probePoint.z : 0));
+  writeBlock("#<_probe_retract_z>=" + xyzFormat.format(toolAxisHeight(atRetract)));
+  writeBlock("#<_probe_depth_z>=" + xyzFormat.format(toolAxisHeight(atDepth)));
   writeBlock("#<_probe_lift>=" + ((extra && extra.lift) ? 1 : 0));
   // Fusion's "Print Results" checkbox. When set, each macro echoes the
   // measured centre, size and deviations to the console via PRINT, which
@@ -934,6 +956,44 @@ function writeProbeParams(extra) {
 // which for a probing cycle is the probing surface. NOT the z handed to
 // onCyclePoint -- that is the RETRACT height, and using it set the origin
 // high by exactly the retract offset.
+// The MACHINE axes, expressed in the frame being written.
+//
+// With TCP on the control owns the rotation, so written Z is not the tool
+// axis: at B90 a written Z move is a machine X move. A written point's
+// machine HEIGHT is its projection on the tool axis v, and its machine X is
+// its projection on u. Both are exact. What is unknown is the constant
+// offset between the frames -- and every consumer below takes a DIFFERENCE,
+// so the constant cancels and the post never needs the work offset or TLO.
+//
+// With TCP off, or on a 3-axis definition, v is (0,0,1) and all of this
+// collapses to the plain Z behaviour it had before.
+function machineAxesInFrame() {
+  var v = new Vector(0, 0, 1);
+  if (machineConfiguration.isMultiAxisConfiguration() && tcp.isSupportedByOperation) {
+    var f = currentSection.isMultiAxis() ?
+      currentSection.getGlobalInitialToolAxis() : currentSection.workPlane.forward;
+    if (f) {
+      v = f;
+    }
+  }
+  // B turns about Y, so machine +X is the tool axis a quarter turn round the
+  // XZ plane: (vx, vy, vz) -> (vz, vy, -vx).
+  return {v:v, u:new Vector(v.z, v.y, -v.x)};
+}
+
+// Machine height of a written point -- the quantity that is a "height" at
+// any index angle, where written Z only is one at B0.
+function toolAxisHeight(p) {
+  var v = machineAxesInFrame().v;
+  return p.x * v.x + p.y * v.y + p.z * v.z;
+}
+
+// Machine X of a written point: the span direction the B level solves along.
+function machineSpanOf(p) {
+  var u = machineAxesInFrame().u;
+  return p.x * u.x + p.y * u.y + p.z * u.z;
+}
+
 function probedSurfaceZ(z) {
   return (cycle.bottom !== undefined) ? cycle.bottom : z;
 }
@@ -1058,21 +1118,32 @@ function probeAxisEdge(axis, dir, ax, ay, z) {
   runProbeMacro("Probe" + axis + "Edge.nc");
 }
 
-function probeZSurface(nz, z) {
-  // Fusion leaves the probe at the CLEARANCE PLANE, not at a probing
-  // standoff, so the post has to bring it down to the approach point
-  // itself. Without this the macro probes clearance+overtravel from
-  // wherever Fusion parked it and never reaches the surface.
-  //
-  // Note we must NOT feed cycle.clearance into #<_probe_clearance> -- that
-  // is the absolute retract plane, not a standoff distance. Doing so made
-  // the macro expect the surface 65 mm below the start and false-trip the
-  // out-of-position alarm.
+function probeZSurface(px, py, z) {
   var surfaceZ = probedSurfaceZ(z);
   writeProbeParams({nomZ: surfaceZ});
-  // sit the probe one approach distance above the surface, then let the
-  // macro probe clearance+overtravel downward through it
-  safeMoveZ(surfaceZ + (cycle.probeClearance || 0));
+
+  // Stand off along the TOOL AXIS, not along written Z. At an index those
+  // are different directions and written Z is the wrong one -- at B90 it is
+  // a lateral move, so the old code stood off sideways and the probe went
+  // nowhere near the surface.
+  //
+  // The lateral parts of this target are where the probe already is, so
+  // protectedMove drops those words and what comes out is a single pure
+  // plunge along the tool axis rather than a three-axis diagonal.
+  var ax = machineAxesInFrame();
+  var standoff = cycle.probeClearance || 0;
+  protectedMove([
+    xOutput.format(px + ax.v.x * standoff),
+    yOutput.format(py + ax.v.y * standoff),
+    zOutput.format(surfaceZ + ax.v.z * standoff)
+  ]);
+
+  // Which way the surface lies, in the written frame. _ProbeSurface is
+  // already vector driven and fully relative, so this is all it needs to
+  // work at any angle -- ProbeZSurface just has to stop overwriting it.
+  writeBlock("#<_ps_ux>=" + xyzFormat.format(-ax.v.x));
+  writeBlock("#<_ps_uy>=" + xyzFormat.format(-ax.v.y));
+  writeBlock("#<_ps_uz>=" + xyzFormat.format(-ax.v.z));
   runProbeMacro("ProbeZSurface.nc");
 }
 
@@ -1114,28 +1185,43 @@ function bLevelWanted() {
 }
 
 function bLevelBefore() {
-  // #5061/#5063 are machine coordinates and the macro reasons in the
-  // machine frame, so the touches must not be made through TCP. Routed
-  // through setTCP rather than a bare M129 so state.tcpIsActive stays
-  // honest and a later section turns TCP back on for itself.
+  // Deliberately does NOT force TCP off any more.
   //
-  // Forced, because M128/M129 is modal in the CONTROLLER while the post
-  // merely assumes it starts off. Run after a program that ended with TCP
-  // on and an unforced call writes nothing, so the touches would go
-  // through the kinematics and #5061/#5063 would not mean what the macro
-  // thinks they mean.
-  setTCP(false, true);
+  // The old reasoning was that #5061/#5063 are machine coordinates so the
+  // touches had to be taken outside the transform. That was simply wrong:
+  // those parameters come from steps_to_mpos, so they are raw machine
+  // positions whatever M128/M129 is doing, and ProbeBLevel's arithmetic is
+  // unaffected either way.
+  //
+  // What the forced M129 DID do was change the frame under every coordinate
+  // written after it, while the post carried on emitting Fusion's part-frame
+  // numbers -- which is what left the two touches retracting to unrelated
+  // heights.
 }
 
-function bLevelAfter(nomX, nomZ) {
+function bLevelAfter(px, py, z) {
   var n = (bLevelPointCount % 2) + 1; // 1, 2, 1, 2, ... -- pairs in order
   ++bLevelPointCount;
+  // ProbeBLevel solves in the MACHINE frame: it reads #5061/#5063, which are
+  // machine X and Z. So the nominals it is given have to be machine X and Z
+  // too, not Fusion's written X and Z.
+  //
+  // That is the whole reason two points on ONE surface were coming through
+  // with different nominal heights. At B90 the surface is a plane of constant
+  // written X, and the written Z that was being passed as the height is a
+  // LATERAL coordinate -- so a flat face looked like an 80 mm step and the
+  // solver would have read a wild tilt off it.
+  //
+  // Projecting onto the tool axis makes a height a height at any angle, and
+  // onto u makes the span a span. The constant offset between the frames
+  // cancels because the macro differences the two points.
+  var surface = new Vector(px, py, probedSurfaceZ(z));
   writeComment("B level point " + n + " captured");
   writeBlock("#<_bl_x" + n + ">=#5061");
   writeBlock("#<_bl_y" + n + ">=#5062");
   writeBlock("#<_bl_z" + n + ">=#5063");
-  writeBlock("#<_bl_nx" + n + ">=" + xyzFormat.format(nomX));
-  writeBlock("#<_bl_nz" + n + ">=" + xyzFormat.format(nomZ));
+  writeBlock("#<_bl_nx" + n + ">=" + xyzFormat.format(machineSpanOf(surface)));
+  writeBlock("#<_bl_nz" + n + ">=" + xyzFormat.format(toolAxisHeight(surface)));
   if (n == 1) {
     return;
   }
@@ -1236,6 +1322,10 @@ function probeOuterXY(widthX, widthY, nx, ny, z) {
 }
 
 function onCyclePoint(x, y, z) {
+  // Kept for writeProbeParams, which needs the POINT to project a height on
+  // to the tool axis -- a bare Z value carries no orientation and at an
+  // index it is a lateral coordinate, not a height.
+  probePoint = new Vector(x, y, z);
   if (!isProbeOperation()) {
     expandCyclePoint(x, y, z);
     return;
@@ -1273,12 +1363,10 @@ function onCyclePoint(x, y, z) {
     writeComment("Probing Z surface");
     if (bLevelWanted()) {
       bLevelBefore();
-      probeZSurface(z, z);
-      // x is the probe point in the driving offset; probedSurfaceZ(z) is
-      // Fusion's Bottom Height, i.e. this face's nominal height in it.
-      bLevelAfter(x, probedSurfaceZ(z));
+      probeZSurface(x, y, z);
+      bLevelAfter(x, y, z);
     } else {
-      probeZSurface(z, z);
+      probeZSurface(x, y, z);
     }
     break;
 
@@ -1987,7 +2075,13 @@ function writeToolBlock() {
   setProperty("showSequenceNumbers", (show == "true" || show == "toolChange") ? "true" : "false");
   writeBlock(arguments);
   setProperty("showSequenceNumbers", show);
-  machineSimulation({/*x:toPreciseUnit(200, MM), y:toPreciseUnit(200, MM), coordinates:MACHINE,*/ mode:TOOLCHANGE}); // move machineSimulation to a tool change position
+  // The stock kernel fires machineSimulation({mode:TOOLCHANGE}) here. It is
+  // deliberately NOT fired here: performToolChangeCycle() is allowed once per
+  // connection, and spending it at the "Tn M6" line swaps the tool in the
+  // spindle before the machine has moved anywhere, so the rack path is drawn
+  // holding the tool it is on its way to collect. atcSimulateToolChange()
+  // fires it instead, between putting the old tool down and picking the new
+  // one up -- where the drawbar actually closes.
 }
 
 var skipBlocks = false;
@@ -2027,6 +2121,29 @@ function onRadiusCompensation() {
   if (radiusCompensation >= 0) {
     error(localize("Radius compensation is not supported: FluidNC has no G41/G42. " +
       "Set the operation's compensation type to 'In computer'."));
+  }
+}
+
+// Fusion's Manual NC entries land here. Without this function the kernel
+// decides on its own what each one becomes; with it the mapping is explicit
+// and cannot quietly change underneath the post. Anything not called out
+// goes to expandManualNC, which is the kernel's own translation into
+// onCommand / onPassThrough -- so pass-through, stop and the rest behave
+// exactly as they did.
+function onManualNC(command, value) {
+  switch (command) {
+  case COMMAND_TOOL_MEASURE:
+    // "Measure tool" -- M101 has the ATC re-gauge whatever is in the
+    // spindle. This is the only route to the COMMAND_TOOL_MEASURE case in
+    // onCommand, so it is named here rather than left to the default.
+    onCommand(COMMAND_TOOL_MEASURE);
+    break;
+  case COMMAND_BREAK_CONTROL:
+    // "Break control" -> $SD/Run=BreakDetection.nc, same reasoning.
+    onCommand(COMMAND_BREAK_CONTROL);
+    break;
+  default:
+    expandManualNC(command, value);
   }
 }
 
@@ -2410,6 +2527,32 @@ function atcSimMove(p) {
   machineSimulation(p);
 }
 
+// The swap event, pinned to where the spindle actually is.
+//
+// machineSimulation() runs moveToTargetInMachineCoords() UNCONDITIONALLY
+// after performToolChangeCycle(), against whatever target the simulation
+// happens to be holding. The stock kernel fires TOOLCHANGE with no
+// coordinates at all -- its own example has an x/y commented out, so a
+// position is plainly what it expects -- and with nothing passed the spindle
+// goes off to machine XY0 and then back to the part, which is a move the real
+// machine never makes: once it has the tool it goes straight to the cut.
+//
+// So pass the position the spindle is already at, which makes that trailing
+// move a no-op, and re-assert it afterwards in case performToolChangeCycle()
+// resets the target itself. That cannot be checked from here -- it is
+// Fusion-internal -- and the re-assert costs one zero-length rapid.
+function atcSimSwap(pos) {
+  machineSimulation({
+    x          : pos.x,
+    y          : pos.y,
+    z          : pos.z,
+    coordinates: MACHINE,
+    feed       : false,
+    mode       : TOOLCHANGE
+  });
+  atcSimMove({x:pos.x, y:pos.y, z:pos.z});
+}
+
 // Custom_ATC::drop_tool(): approach at the pull-off Y, descend to holder
 // height, slide IN along Y, then lift off the taper.
 function atcSimDrop(slot) {
@@ -2433,6 +2576,12 @@ function atcSimPick(slot) {
   atcSimMove({x:s.x, y:s.y});
   atcSimMove({z:s.z + p.z});
   atcSimMove({z:s.z, feed:1000});  // G53 G1 Z.. F1000 onto the taper
+  // THE SWAP. The spindle is down on the taper with the holder still in the
+  // fork, which is where the drawbar actually closes. Everything above this
+  // line is drawn holding whatever was in the spindle before; everything
+  // below it holds the new tool. See atcSimulateToolChange() for why there
+  // is exactly one of these per change.
+  atcSimSwap({x:s.x, y:s.y, z:s.z});
   atcSimMove({y:s.y + p.y});       // out of the fork
   atcSimMove({z:atcGeometry.safeZ});
 }
@@ -2458,23 +2607,26 @@ function atcSimProbeToolsetter(bodyLength) {
   atcSimMove({z:atcGeometry.safeZ});
 }
 
-// Replays the whole change: the drop, the pick and the toolsetter stage.
-// This replay deliberately does NOT ask for mode:TOOLCHANGE anywhere.
+// Replays the whole change: the drop, the swap, the pick and the toolsetter
+// stage. This function owns the one mode:TOOLCHANGE request for the change.
 //
-// Fusion performs the tool change itself when it processes the toolpath, and
-// performToolChangeCycle() is allowed once per connection -- so the post
-// asking for a second one fails with "A tool change was requested via the
-// simulation API when a tool change or WCS activation has already occurred
-// earlier in the connection", wherever in the sequence it is put and whether
-// the surrounding moves are in work or machine coordinates.
-//
-// The cost is only WHEN the model swaps: Fusion does it at its own moment
-// rather than at the instant the drawbar closes, so part of the rack path
-// may be drawn holding the wrong tool. The path itself -- which is what the
-// replay exists to collision-check -- is unaffected.
+// performToolChangeCycle() is allowed ONCE per connection, and a WCS
+// activation spends the same budget -- which is what the replay used to do to
+// itself before every move here was forced to coordinates:MACHINE. With that
+// fixed the request is available again, so the only question is where to
+// spend it. writeToolBlock() is the wrong place: it runs at the "Tn M6" line,
+// before the machine has moved, so the spindle is drawn already holding the
+// tool it has not fetched yet. The right place is between putting the old
+// tool down and picking the new one up, which is where the drawbar closes on
+// the real machine. The kernel's call site has been removed accordingly.
 function atcSimulateToolChange(newTool, bodyLength) {
   if (!SIMULATE_ATC_MOVES) {
-    atcSimulatedTool = newTool; // no path drawn; Fusion swaps the tool as usual
+    // No path drawn, but the swap still has to happen somewhere, and
+    // writeToolBlock() no longer does it. No position to pin it to on this
+    // branch -- nothing has been replayed -- so the trailing
+    // moveToTargetInMachineCoords() is left to its own devices here.
+    machineSimulation({mode:TOOLCHANGE});
+    atcSimulatedTool = newTool;
     return;
   }
   var oldSlot = (atcSimulatedTool >= 0) ? atcSlotIndex(atcSimulatedTool) : -1;
@@ -2491,15 +2643,23 @@ function atcSimulateToolChange(newTool, bodyLength) {
   // remembers _prev_tool across power cycles, Fusion cannot.
 
   // ---- get the new tool ----
+  // The swap happens inside this phase, at the moment of engagement: on the
+  // taper for a rack tool, at the setter for one the operator fits. It is
+  // deliberately NOT between the two phases -- with an empty spindle there is
+  // no drop phase at all, so a swap there would fire before the machine had
+  // moved, which is the thing being fixed.
   if (newSlot >= 0) {
     // Rack tool. pick_tool() then apply_tlo_from_gauge() -- the pocket's
     // gauge length is already stored, so there is NO touch-off and the next
     // thing that happens is cutting. (The firmware does probe a pocket the
     // very first time it is used, but whether a gauge is stored is firmware
     // state the post cannot see, so the normal case is what gets drawn.)
-    atcSimPick(newSlot);
+    atcSimPick(newSlot);              // fires the swap on the taper
   } else {
     atcSimParkOverToolsetter();       // the operator installs it here, on M0
+    // THE SWAP, for a tool that arrives by hand: the spindle is parked over
+    // the setter and that is where the operator fits it, before any touch-off.
+    atcSimSwap({x:atcGeometry.ets.x, y:atcGeometry.ets.y, z:atcGeometry.safeZ});
     if (newTool != PROBE_TOOL) {
       // Everything outside the rack is touched off -- no gauge is stored for
       // them. T1 is the exception: the probe carries a fixed, manually
@@ -2564,12 +2724,26 @@ function defineMachine() {
 
     // multi-axis feedrates
     if (machineConfiguration.isMultiAxisConfiguration()) {
+      // FEED_FPM, not DPM. The stock line read
+      //     useTCP ? FEED_FPM : getProperty("useDPMFeeds") ? FEED_DPM : ...
+      // which had two problems. "useDPMFeeds" is not one of this post's
+      // properties, and getProperty() with no default errors on an id that
+      // does not exist -- the same way "safePositionMethod" used to crash
+      // Simulate -- and JS evaluates the third argument regardless of which
+      // branch the first one takes, so it fired every time this fallback ran.
+      //
+      // And DPM would be wrong anyway: FluidNC has no degrees-per-minute
+      // concept. It reads F as mm/min at the tip under G94 and scales the
+      // motor feed by motor_len/cart_len to hold it there, which is exactly
+      // what FEED_FPM means. G93 inverse time is the only other mode it
+      // understands, and the segmented transform handles that correctly, so
+      // INVERSE_MINUTES stays as the inverse-time unit.
       machineConfiguration.setMultiAxisFeedrate(
-        useTCP ? FEED_FPM : getProperty("useDPMFeeds") ? FEED_DPM : FEED_INVERSE_TIME,
+        FEED_FPM,
         9999.99, // maximum output value for inverse time feed rates
-        getProperty("useDPMFeeds") ? DPM_COMBINATION : INVERSE_MINUTES, // INVERSE_MINUTES/INVERSE_SECONDS or DPM_COMBINATION/DPM_STANDARD
-        0.5, // tolerance to determine when the DPM feed has changed
-        1.0 // ratio of rotary accuracy to linear accuracy for DPM calculations
+        INVERSE_MINUTES,
+        0.5, // tolerance to determine when the feed has changed
+        1.0 // ratio of rotary accuracy to linear accuracy
       );
       setMachineConfiguration(machineConfiguration);
     }
@@ -2657,6 +2831,34 @@ function getWorkPlaneMachineABC(_section, rotate) {
 }
 // <<<<< INCLUDED FROM include_files/getWorkPlaneMachineABC.cpi
 // >>>>> INCLUDED FROM include_files/positionABC.cpi
+// Whether this index actually turns the rotary, as opposed to merely
+// re-stating where it already is.
+//
+// It matters because of homeXYOnRotary. forceABC() resets the OUTPUT
+// formatters, not the tracked position, so after anything that calls
+// forceWorkPlane() -- a tool change does -- the B word is emitted whether or
+// not the axis moves, and the "a || b || c" test below is true either way.
+// That dragged X and Y home before an index that turned nothing. The tracked
+// ABC is separate from the formatters and survives the force, so it is what
+// says whether metal actually moves.
+//
+// The first section is the exception, and deliberately conservative: this
+// rotary does not home, so the post has no idea where B really is. The kernel
+// assumes (0,0,0) -- see getWorkPlaneMachineABC -- and an assumption is not
+// knowledge, so the first index is always treated as a move.
+function rotaryWillMove(abc) {
+  if (isFirstSection()) {
+    return true;
+  }
+  var current = getCurrentABC();
+  if (current == undefined) {
+    return true;
+  }
+  return abcFormat.areDifferent(abc.x, current.x) ||
+    abcFormat.areDifferent(abc.y, current.y) ||
+    abcFormat.areDifferent(abc.z, current.z);
+}
+
 function positionABC(abc, force) {
   if (!machineConfiguration.isMultiAxisConfiguration()) {
     error("Function 'positionABC' can only be used with multi-axis machine configurations.");
@@ -2672,7 +2874,7 @@ function positionABC(abc, force) {
   var c = cOutput.format(abc.z);
   if (a || b || c) {
     writeRetract(Z);
-    if (getSetting("retract.homeXY.onIndexing", false)) {
+    if (getSetting("retract.homeXY.onIndexing", false) && rotaryWillMove(abc)) {
       writeRetract(settings.retract.homeXY.onIndexing);
     }
     onCommand(COMMAND_UNLOCK_MULTI_AXIS);
@@ -2969,7 +3171,7 @@ function setWorkPlane(abc) {
 
   writeStartBlocks(workplaneIsRequired, function () {
     writeRetract(Z);
-    if (getSetting("retract.homeXY.onIndexing", false)) {
+    if (getSetting("retract.homeXY.onIndexing", false) && rotaryWillMove(abc)) {
       writeRetract(settings.retract.homeXY.onIndexing);
     }
     if (typeof cancelLengthCompensation == "function") {
@@ -2998,6 +3200,50 @@ function setWorkPlane(abc) {
   var myVar2 = getCoolantCodes(tool.coolant);
   writeInitialPositioning(initialPosition, isRequired, myVar1, myVar2);
 */
+// The spindle direction in the frame writeInitialPositioning writes in, or
+// undefined when the stock "XY, then Z" approach is already right.
+//
+// It is only wrong when the CONTROL does the rotation, i.e. TCP is on for the
+// operation. With TCP off, Fusion has already rewritten the toolpath into
+// machine-aligned coordinates, so written Z IS the tool axis and the stock
+// pair is correct -- as it also is on a 3-axis definition, or for a section
+// that is not indexed at all.
+//
+// Simultaneous sections get the same treatment, and for the same reason. The
+// tool axis moves during the CUT, but not during the approach: defineWorkPlane
+// has already called cancelTransformation -- so the written frame is the setup
+// frame -- and positionABC has already put B at the initial angle. So B is
+// fixed while the approach runs, the transform is one fixed rotation, and the
+// arithmetic is identical to an indexed section. Only the vector differs: the
+// axis the toolpath STARTS on rather than the one it holds throughout.
+// Which written axis word the tool axis lines up with, or -1 if none.
+//
+// When it lines up -- every index at a multiple of 90 degrees -- the lateral
+// travel and the plunge fall on SEPARATE words, so the plunge is isolated by
+// simply not writing that word on the first block. Omitting it holds that
+// component wherever the G53 retract left it, which makes the traverse flat
+// at machine Z0 and means there is no lift to overtravel. That is strictly
+// better than approaching from a fixed distance up the axis, and it needs
+// nothing the post does not already have.
+//
+// Off-axis the tool axis is a blend of two words and no single word can be
+// held, so those fall back to the lift.
+function getTcpApproachAxis() {
+  if (!machineConfiguration.isMultiAxisConfiguration()) {
+    return undefined;
+  }
+  if (!tcp.isSupportedByOperation) {
+    return undefined;
+  }
+  var forward = currentSection.isMultiAxis() ?
+    currentSection.getGlobalInitialToolAxis() :
+    currentSection.workPlane.forward;
+  if (!forward || isSameDirection(forward, new Vector(0, 0, 1))) {
+    return undefined; // already pointing down the written Z
+  }
+  return forward;
+}
+
 function writeInitialPositioning(position, isRequired, codes1, codes2) {
   var motionCode = {single:0, multi:0};
   switch (highFeedMapping) {
@@ -3034,10 +3280,61 @@ function writeInitialPositioning(position, isRequired, codes1, codes2) {
     // and M128 never went out at all: the post was relying on whatever
     // mode the controller happened to be left in.
     setTCP(tcp.isSupportedByMachine && tcp.isSupportedByOperation);
-    writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(position.x), yOutput.format(position.y), feed, additionalCodes[0]);
-    machineSimulation({x:position.x, y:position.y});
-    writeBlock(gMotionModal.format(motionCode.single), getLengthCompCode(), zOutput.format(position.z), additionalCodes[1]);
-    machineSimulation(tcp.isSupportedByOperation ? {x:position.x, y:position.y, z:position.z} : {z:position.z});
+
+    // With TCP on the CONTROL owns the rotation, so the XYZ written here are
+    // in the WCS frame and none of them is the tool axis. TCPCartesian's
+    // forward() rotates the commanded point about the pivot by -B about +Y,
+    // so at B90 a part X move comes out as a machine Z move and a part Z move
+    // comes out as a machine X move.
+    //
+    // That makes the stock "XY, then Z" pair the wrong way round: the XY
+    // block sets the HEIGHT and the Z block traverses ACROSS at whatever
+    // height the part X happened to put it, which is not the G53 Z0 the
+    // retract just reached. The plunge then falls to the first toolpath
+    // rapid.
+    //
+    // So when the part is indexed, go straight to the clearance point in one
+    // move. ONE path, every angle -- there is no special case at multiples
+    // of 90, where the tool axis happens to land on a single written word.
+    //
+    // Holding that word would traverse flat at machine Z0 and plunge
+    // separately, which looks tidier, but it is only available at those four
+    // angles, and the generalisation of it to any angle -- writing the
+    // point's projections on the machine axes with TCP off -- is only a pure
+    // rotation when the work origin sits on the rotary axis in X and Z, and
+    // lands 2*e*SIN[B/2] out when it does not. A path whose safety is
+    // unconditional beats one that holds only while a fixture convention the
+    // post cannot check holds, so the single move is used everywhere and the
+    // behaviour does not change shape with the angle.
+    //
+    // It needs no lift on top: getInitialPosition() ALREADY sits on the
+    // operation's clearance plane, measured along the tool axis, so anything
+    // added to it buys nothing but travel at the top -- and risks running
+    // out of it.
+    //
+    // IT NEVER DROPS BELOW THE CLEARANCE PLANE, at any angle. For a fixed B
+    // the transform is affine, so a straight line in this frame is a
+    // straight line in machine space; and machine Z differs from the
+    // tool-axis coordinate only by a constant -- d(machine Z) is d . v -- so
+    // the tool-axis coordinate varies linearly along the path too. It starts
+    // at machine Z0, which is the top of travel and therefore the highest
+    // that coordinate can be, and it ends ON the clearance plane. Monotonic
+    // between two such endpoints puts every point in between at or above it.
+    //
+    // getTcpApproachAxis() returns nothing when the tool axis is already the
+    // written Z, so an un-indexed section, a TCP-disabled job and a 3-axis
+    // machine all fall through to the stock pair below, untouched.
+    if (getTcpApproachAxis()) {
+      writeBlock(modalCodes, gMotionModal.format(motionCode.multi), getLengthCompCode(),
+        xOutput.format(position.x), yOutput.format(position.y), zOutput.format(position.z),
+        feed, additionalCodes[0], additionalCodes[1]);
+      machineSimulation({x:position.x, y:position.y, z:position.z});
+    } else {
+      writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(position.x), yOutput.format(position.y), feed, additionalCodes[0]);
+      machineSimulation({x:position.x, y:position.y});
+      writeBlock(gMotionModal.format(motionCode.single), getLengthCompCode(), zOutput.format(position.z), additionalCodes[1]);
+      machineSimulation(tcp.isSupportedByOperation ? {x:position.x, y:position.y, z:position.z} : {z:position.z});
+    }
 
     forceModals(gMotionModal);
     if (isRequired) {
@@ -3048,7 +3345,31 @@ function writeInitialPositioning(position, isRequired, codes1, codes2) {
   validate(!validateLengthCompensation || state.lengthCompensationActive, "Tool length compensation is not active."); // make sure that lenght compensation is enabled
   if (!isRequired) { // simple positioning
     var modalCodes = formatWords(gAbsIncModal.format(90), gPlaneModal.format(17));
+    // Assert TCP here too, not just on the full path above. M128/M129 is
+    // modal in the CONTROLLER, and things other than this function turn it
+    // off: bLevelBefore() forces M129 for the B-level touches, because those
+    // read #5061/#5063 and have to be taken in the machine frame. Nothing
+    // used to turn it back on, because a following operation that needs no
+    // tool change and no retract lands here -- so a geometry probe after a
+    // B level ran with the transform off, and at an indexed B every axis word
+    // after that meant the wrong thing.
+    //
+    // setTCP() is idempotent, so this emits nothing in the normal case and
+    // only speaks up when something has desynced the state.
+    setTCP(tcp.isSupportedByMachine && tcp.isSupportedByOperation);
     forceXYZ();
+    // Stock ordering, deliberately. An earlier attempt split this along the
+    // tool axis using getCurrentPosition(), which looked safe because the
+    // branch only runs when nothing retracted through G53 -- but on a PROBING
+    // section that position is not in the frame being written, and feeding it
+    // through the arithmetic produced a sign-flipped staging point
+    // (Y+167.104 where every other Y in the program was negative).
+    //
+    // The stock code survives the same frame error because it only uses the
+    // value as a boolean -- "am I below the target" -- so a wrong frame costs
+    // an unnecessary or missing lift, not a bad coordinate. Until there is a
+    // position source known to be in the written frame, that is the safer
+    // trade.
     if (!state.retractedZ && xyzFormat.getResultingValue(getCurrentPosition().z) < xyzFormat.getResultingValue(position.z)) {
       writeBlock(modalCodes, gMotionModal.format(motionCode.single), zOutput.format(position.z), feed);
       machineSimulation({z:position.z});

@@ -1,0 +1,16 @@
+(guages all tool in ATC Rack T2-T7)
+M6T0 
+M6T2 (pick up T2)
+M101 (Guage tool)
+M6T3 (pick up T3)
+M101 (Guage tool)
+M6T4 (pick up T4)
+M101 (Guage tool)
+M6T5 (pick up T5)
+M101 (Guage tool)
+M6T6 (pick up T6)
+M101 (Guage tool)
+M6T7 (pick up T7)
+M101 (Guage tool)
+M6T0 (Return tool to Rack)
+M30

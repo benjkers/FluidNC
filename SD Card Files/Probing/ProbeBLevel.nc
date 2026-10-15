@@ -310,9 +310,22 @@ o230 endif
 
 (================= APPLY =================)
 (G10 L20 sets the offset from where the machine is standing now:)
-(    offset = MPos - value. B has not moved since the touches, so)
-(    offset = B_machine - tilt, which is the angle the part is level at.)
-G10 L20 P#<_bl_wcs> B#<_bl_tilt>
+(    offset = MPos - value)
+(so the value written decides which MACHINE angle work B zero lands on.)
+()
+(It has to carry the work angle the touches were taken at. Writing the bare)
+(tilt makes work B0 mean "the probed face is level" -- right when probing at)
+(work B0, and wrong by the index angle otherwise. Level a part at work B90)
+(and work B0 would come to mean the 90 degree orientation, shifting every)
+(toolpath by 90.)
+()
+(Adding the current work angle makes the write ADJUST the existing offset by)
+(the measured tilt instead:)
+(    offset_new = MPos - [B_work + tilt] = offset_old - tilt)
+(which is the same correction wherever it was probed, and collapses to the)
+(old behaviour at work B0 where B_work is zero.)
+#<_bl_atb>=[#<_b> + #<_bl_tilt>]
+G10 L20 P#<_bl_wcs> B#<_bl_atb>
 
 (PRINT, ======================================== )
 (PRINT, B LEVEL  touch 1 X %.3f#<_bl_x1> Z %.4f#<_bl_z1> nom Z %.3f#<_bl_nz1> )

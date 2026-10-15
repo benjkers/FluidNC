@@ -1,0 +1,10 @@
+# FluidNC atc_custom gauge table for 'atc_custom' -- auto-generated
+prev_tool=0
+ets_reference_z=-232.8656 1
+probe_gauge=118.1640 1
+tool2_gauge=90.3847 1
+tool3_gauge=77.9597 1
+tool4_gauge=79.9035 1
+tool5_gauge=113.8878 1
+tool6_gauge=104.1441 1
+tool7_gauge=94.2410 1
