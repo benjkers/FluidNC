@@ -10,18 +10,19 @@
 ()
 (RUN FROM SD:   $SD/Run=/Probing/ProbeBLevel.nc)
 
-(=================== TWO WAYS TO RUN IT ===================)
-(  _bl_mode 0  the macro probes both points itself, from the machine)
-(              coordinates taught in the MODE 0 block below. Teach once)
-(              per fixture.)
-(  _bl_mode 1  something else has already probed them and passed the)
-(              results in. The post does this when "B level: use this)
-(              point" is ticked on two Probe Geometry surface cycles.)
+(=================== HOW IT IS RUN ===================)
+(  Driven by the post, always. Tick "B level: use this point" on two Probe)
+(  Geometry - Surface cycles; the post captures each touch and its nominal,)
+(  then calls this macro after the second one. Ticked cycles pair up in)
+(  program order, so four ticks means two levelling passes.)
 ()
-(  Anything the caller has already set is LEFT ALONE -- every shared)
-(  input below is defaulted only if it does not already exist, and the)
-(  mode 0 teach values are assigned inside the mode 0 block, so they)
-(  cannot overwrite what the post passed in.)
+(  It does no probing and makes no moves of its own. The teach-and-probe)
+(  mode this used to carry is gone: it held its own taught DRO coordinates)
+(  and drove to them under G53, which is a different frame from #<_abs_*>)
+(  once TCP is on, so it was only ever valid at B0 -- and nothing used it.)
+()
+(  Anything the caller sets is LEFT ALONE: every input below is defaulted)
+(  only if it does not already exist.)
 
 (=================== THE MATHS ===================)
 (  A face that is flat in the part frame sits at machine height)
@@ -68,29 +69,31 @@ $SD/Run=/Probing/ProbeInit.nc
 G21
 G90
 M5
-M129 (TCP off - this measures the machine frame)
+(NO M129 here. This macro leaves the TCP state exactly as the caller had it.)
+()
+(It used to force TCP off, on the grounds that #5061-5063 are machine-frame)
+(and so had to be read outside the transform. That is false: those come from)
+(steps_to_mpos, which ends in motors_to_cartesian, which applies inverse --)
+(they are part-frame, the work frame plus a constant, and the solve only ever)
+(differences them so the constant cancels either way.)
+()
+(What the forced M129 DID do was leave TCP off on exit. The post follows this)
+(call with a tool-axis retract -- G0X82.5 at B90 -- which with TCP off is a)
+(machine X move instead: a 103 mm lateral lurch where a vertical lift was)
+(intended.)
+()
+(Nothing here needs TCP either way: this macro makes no moves at all beyond)
+(the optional go-level lift at the end, and that one is along the tool axis,)
+(which is correct in whichever state the caller left it.)
 
 (================= SHARED INPUTS =================)
 (Defaulted only when the caller has not already set them.)
-
-(0 = probe here, 1 = results already supplied.)
-o10 if [EXISTS[#<_bl_mode>]]
-o10 else
-#<_bl_mode>=0
-o10 endif
 
 (Which offset to write: 1 = G54 ... 6 = G59, 0 = the active one.)
 o11 if [EXISTS[#<_bl_wcs>]]
 o11 else
 #<_bl_wcs>=0
 o11 endif
-
-(DRO Z that clears the part. Used for the traverses in mode 0 and for)
-(the optional rotate to level.)
-o12 if [EXISTS[#<_bl_safez>]]
-o12 else
-#<_bl_safez>=-5.000
-o12 endif
 
 (Minimum X spacing. The angle resolves as probe scatter over this, so)
 (spread the points as far apart in X as the part allows.)
@@ -118,16 +121,15 @@ o16 else
 #<_bl_goto0>=0
 o16 endif
 
-(================= MODE 1: CHECK WHAT CAME IN =================)
+(================= CHECK WHAT CAME IN =================)
 (The two measurements cannot be defaulted, so say which one is missing)
 (rather than letting the parser complain about an undefined parameter.)
 (The nominals can be: zero on both means one continuous face, and zero)
 (nominal X means skip the spacing check.)
-o20 if [#<_bl_mode> GT 0]
 
 o21 if [EXISTS[#<_bl_x1>] AND EXISTS[#<_bl_z1>]]
 o21 else
-(PRINT, STOPPED: mode 1, but point 1 was not passed in. )
+(PRINT, STOPPED: point 1 was not passed in. )
 (PRINT, Needs _bl_x1 and _bl_z1 set before this macro runs. )
 $Alarm/Send=3
 M30
@@ -135,7 +137,7 @@ o21 endif
 
 o22 if [EXISTS[#<_bl_x2>] AND EXISTS[#<_bl_z2>]]
 o22 else
-(PRINT, STOPPED: mode 1, but point 2 was not passed in. )
+(PRINT, STOPPED: point 2 was not passed in. )
 (PRINT, Needs _bl_x2 and _bl_z2 set before this macro runs. )
 $Alarm/Send=3
 M30
@@ -166,8 +168,6 @@ o28 else
 #<_bl_y2>=0
 o28 endif
 
-o20 endif
-
 (================= LOG TAGS =================)
 #<_probe_prog_id>=8040
 #<_probe_log_kind>=0
@@ -177,62 +177,6 @@ o20 endif
 #<_probe_dev_pos>=0
 #<_probe_runout>=0
 #<_probe_log_nomsize>=0
-
-(================= MODE 0: TEACH AND PROBE =================)
-o100 if [#<_bl_mode> EQ 0]
-
-(--- point 1: machine X and Y of the touch ---)
-#<_bl_x1>=-180.000
-#<_bl_y1>=-150.000
-(DRO Z to drop to before the touch. Reached with a PROTECTED move, so a)
-(face higher than taught stops the program instead of crashing.)
-#<_bl_zs1>=-80.000
-(NOMINAL height of this face in the work offset. Leave both nominals at)
-(0 when the two points are on the same face.)
-#<_bl_nz1>=0.000
-(NOMINAL X of this point in the work offset, for the sanity check only.)
-(Leave both at 0 to skip it.)
-#<_bl_nx1>=0.000
-
-(--- point 2 ---)
-#<_bl_x2>=-280.000
-#<_bl_y2>=-150.000
-#<_bl_zs2>=-80.000
-#<_bl_nz2>=0.000
-#<_bl_nx2>=0.000
-
-(How far below the taught start Z the face may be, at either point.)
-#<_bl_drop>=6.000
-#<_bl_reach>=[#<_bl_drop> + #<_probe_overtravel>]
-
-G53 G0 Z#<_bl_safez>
-
-G53 G0 X#<_bl_x1> Y#<_bl_y1>
-G53 G38.3 Z#<_bl_zs1> F#<_probe_feed_link>
-G53 G38.2 Z[#<_bl_zs1> - #<_bl_reach>] F#<_probe_feed_fast>
-G91
-G0 Z#<_probe_backoff>
-G38.2 Z[0 - #<_probe_backoff> * 2] F#<_probe_feed_slow>
-G90
-#<_bl_z1>=#5063
-G91
-G0 Z#<_probe_backoff>
-G90
-G53 G0 Z#<_bl_safez>
-
-G53 G0 X#<_bl_x2> Y#<_bl_y2>
-G53 G38.3 Z#<_bl_zs2> F#<_probe_feed_link>
-G53 G38.2 Z[#<_bl_zs2> - #<_bl_reach>] F#<_probe_feed_fast>
-G91
-G0 Z#<_probe_backoff>
-G38.2 Z[0 - #<_probe_backoff> * 2] F#<_probe_feed_slow>
-G90
-#<_bl_z2>=#5063
-G91
-G0 Z#<_probe_backoff>
-G90
-G53 G0 Z#<_bl_safez>
-o100 endif
 
 (================= DELTAS =================)
 #<_bl_dx>=[#<_bl_x2> - #<_bl_x1>]
@@ -353,7 +297,24 @@ $Probe/Log
 
 (================= OPTIONAL: GO LEVEL =================)
 o300 if [#<_bl_goto0> GT 0]
-G53 G0 Z#<_bl_safez>
+(Clear along the TOOL AXIS before rotating B.)
+()
+(This was a partial G53, unsafe once TCP is on for two separate reasons:)
+(its words are TRUE MACHINE coordinates while the height it was given came)
+(from the DRO, which reads part-frame; and a G53 naming only Z inherits X)
+(and Y from)
+(gc_state.position, which is part-frame, so the UNNAMED axes jump too.)
+()
+(_probe_retract_z is already a tool-axis height in the work frame, which is)
+(exactly what is wanted here.)
+o310 if [EXISTS[#<_probe_retract_z>] EQ 0]
+(Standalone run with no retract height supplied: lift along the tool axis by)
+(a fixed modest amount rather than guessing an absolute height.)
+#<_ta_target>=[[[#<_x> * #<_probe_axis_ux>] + [#<_y> * #<_probe_axis_uy>] + [#<_z> * #<_probe_axis_uz>]] + 25.000]
+o310 else
+#<_ta_target>=#<_probe_retract_z>
+o310 endif
+$SD/Run=/Probing/_ToolAxisZ.nc
 G0 B0
 (MSG: rotated to work B0 - the part is now level)
 o300 endif
@@ -364,8 +325,7 @@ o300 endif
 (  Tick "B level: use this point" on two Probe Geometry - Surface)
 (  cycles. The post then switches TCP off, captures the machine X, Y and)
 (  Z of each touch along with that operation's nominal X and Bottom)
-(  Height, and calls this macro after the second one. Ticked cycles pair)
-(  up in program order, so four ticks means two levelling passes.)
+(  Height, and calls this macro after the second one.)
 ()
 (  By hand in Manual NC pass-through, the same thing looks like:)
 ()
@@ -380,7 +340,6 @@ o300 endif
 (                              #<_bl_z2>=#5063)
 (                              #<_bl_nx2>=100)
 (                              #<_bl_nz2>=-12.5)
-(                              #<_bl_mode>=1)
 (                              #<_bl_wcs>=1)
 (                              $SD/Run=/Probing/ProbeBLevel.nc)
 ()

@@ -45,9 +45,28 @@ o2353 else
 o2353 endif
 
 (--- remember where we started so we can hand the probe back ---)
-#<_ps_sx>=#<_abs_x>
-#<_ps_sy>=#<_abs_y>
-#<_ps_sz>=#<_abs_z>
+(WORK coordinates, not #<_abs_*>, and the return below is a plain G90 move)
+(rather than G53. The two are not the same frame once TCP is on:)
+()
+(  get_mpos runs steps_to_mpos, which ends in motors_to_cartesian,)
+(  which for TCPCartesian applies inverse. So #<_abs_*> -- and #5061-5063,)
+(  read the same way -- are UN-ROTATED part-frame coordinates.)
+()
+(  A G53 block is the other frame: it sets _suspended, so its words are TRUE)
+(  machine coordinates and no transform is applied.)
+()
+(Capturing from one and replaying into the other used to send the retract off)
+(on a diagonal. At B90 with the origin on the rotary axis it left by about 67)
+(mm in machine X -- straight through anything clamped next to the part. It)
+(was invisible until now only because at B0 the two frames coincide exactly.)
+()
+(#<_x> is get_mpos minus get_wco, and get_wco carries the WCS, G92 and)
+(the tool length offset -- the same total a G90 word has added back to it. So)
+(reading #<_x> here and writing it below is an exact round trip at any index)
+(angle, and it needs no pivot, no B and no offsets in the macro.)
+#<_ps_sx>=#<_x>
+#<_ps_sy>=#<_y>
+#<_ps_sz>=#<_z>
 
 #<_ps_reach>=[#<_probe_clearance> + #<_probe_overtravel>]
 
@@ -108,6 +127,20 @@ o2354 else
     #<_probe_runout>=0
 o2354 endif
 
+(--- the same touch, in WORK coordinates ---)
+(#5061-5063, and so _ps_x/y/z above, are PART-frame: the work frame plus the)
+(whole offset total. Fine on their own, and fine in differences, but a caller)
+(that mixes one with a reading from #<_x> picks up that offset as an error --)
+(which is exactly what a feature centre compared against a nominal does.)
+()
+(The offset is recoverable right here without knowing the WCS, G92 or the)
+(tool length: #<_abs_i> and #<_i> are the same point expressed either side of)
+(it, so their difference IS the total. Every caller uses these from now on,)
+(and at B0 they are identical to the part-frame values anyway.)
+#<_ps_wx>=[#<_ps_x> - [#<_abs_x> - #<_x>]]
+#<_ps_wy>=[#<_ps_y> - [#<_abs_y> - #<_y>]]
+#<_ps_wz>=[#<_ps_z> - [#<_abs_z> - #<_z>]]
+
 (--- RELEASE the probe before any further probe move ---)
 (The accurate touch above leaves the stylus deflected, and FluidNC rejects)
 (a G38 that begins with the probe already tripped -- mc_probe_cycle checks)
@@ -119,4 +152,7 @@ G0 X[0 - #<_ps_bx>] Y[0 - #<_ps_by>] Z[0 - #<_ps_bz>]
 G90
 
 (--- hand the probe back where the caller left it ---)
-G53 G38.3 X#<_ps_sx> Y#<_ps_sy> Z#<_ps_sz> F#<_probe_feed_link>
+(Work frame, so TCP maps it for us -- see the capture above for why this is)
+(not G53. Still protected: the stylus is in the spindle.)
+G90
+G38.3 X#<_ps_sx> Y#<_ps_sy> Z#<_ps_sz> F#<_probe_feed_link>

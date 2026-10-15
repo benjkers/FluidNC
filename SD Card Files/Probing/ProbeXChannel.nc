@@ -12,20 +12,29 @@
 
 $SD/Run=/Probing/ProbeInit.nc
 
-#<_start_abs_x>=#<_abs_x>
-#<_start_abs_y>=#<_abs_y>
-#<_start_abs_z>=#<_abs_z>
+(--- where we started, in LATERAL-PLANE coordinates ---)
+(l1 is the written direction that comes out as machine X; l2 is written Y,)
+(which B never rotates. Both are perpendicular to the tool axis, so a move in)
+(this plane never changes height.)
+()
+(This used to capture #<_abs_*> and replay it under G53. Those are different)
+(frames once TCP is on -- see _LateralMove.nc -- and at B90 the mismatch was)
+(worth 67 mm. Everything here is now the WORK frame, start to finish.)
+#<_start_l1>=[[#<_x> * #<_probe_lat_ux>] + [#<_y> * #<_probe_lat_uy>] + [#<_z> * #<_probe_lat_uz>]]
+#<_start_l2>=#<_y>
 
 #<_halfx>=[#<_probe_width_x> / 2]
 
 (--- -X face, probing -X ---)
 o1100 if [#<_probe_lift> GT 0]
 G90
-G0 Z#<_probe_retract_z>
+#<_ta_target>=#<_probe_retract_z>
+$SD/Run=/Probing/_ToolAxisZ.nc
 o1100 endif
-#<_tgx>=[#<_start_abs_x> + [-1 * [#<_halfx> - #<_probe_clearance> - #<_probe_tool_radius>]]]
-G53 G38.3 X#<_tgx> F#<_probe_feed_link>
-o1101 if [ABS[#<_abs_x> - #<_tgx>] GT 0.050]
+#<_lm_l1>=[#<_start_l1> + [-1 * [#<_halfx> - #<_probe_clearance> - #<_probe_tool_radius>]]]
+#<_lm_l2>=#<_y>
+$SD/Run=/Probing/_LateralMove.nc
+o1101 if [ABS[#<_lm_at1> - #<_lm_l1>] GT 0.050]
     (MSG: PROBE ERROR - obstruction while traversing to the standoff)
     (MSG: the probe stopped short, so nothing is where it expects)
     $Alarm/Send=3
@@ -33,29 +42,32 @@ o1101 if [ABS[#<_abs_x> - #<_tgx>] GT 0.050]
 o1101 endif
 o1102 if [#<_probe_lift> GT 0]
 G90
-G38.3 Z#<_probe_depth_z> F#<_probe_feed_link>
-o1103 if [ABS[#<_z> - #<_probe_depth_z>] GT 0.050]
+#<_ta_target>=#<_probe_depth_z>
+$SD/Run=/Probing/_ToolAxisZ.nc
+o1103 if [ABS[#<_ta_at> - #<_probe_depth_z>] GT 0.050]
     (MSG: PROBE ERROR - obstruction on the way down to probing depth)
     (MSG: the standoff is probably inside material, check the feature size)
     $Alarm/Send=3
     G4 P0.1
 o1103 endif
 o1102 endif
-#<_ps_ux>=-1
-#<_ps_uy>=0
-#<_ps_uz>=0
+#<_ps_ux>=[0 - #<_probe_lat_ux>]
+#<_ps_uy>=[0 - #<_probe_lat_uy>]
+#<_ps_uz>=[0 - #<_probe_lat_uz>]
 #<_ps_rotate>=1
 $SD/Run=/Probing/_ProbeSurface.nc
-#<_wxa>=#<_ps_x>
+#<_wxa>=[[#<_ps_wx> * #<_probe_lat_ux>] + [#<_ps_wy> * #<_probe_lat_uy>] + [#<_ps_wz> * #<_probe_lat_uz>]]
 
 (--- +X face, probing +X ---)
 o1104 if [#<_probe_lift> GT 0]
 G90
-G0 Z#<_probe_retract_z>
+#<_ta_target>=#<_probe_retract_z>
+$SD/Run=/Probing/_ToolAxisZ.nc
 o1104 endif
-#<_tgx>=[#<_start_abs_x> + [1 * [#<_halfx> - #<_probe_clearance> - #<_probe_tool_radius>]]]
-G53 G38.3 X#<_tgx> F#<_probe_feed_link>
-o1105 if [ABS[#<_abs_x> - #<_tgx>] GT 0.050]
+#<_lm_l1>=[#<_start_l1> + [1 * [#<_halfx> - #<_probe_clearance> - #<_probe_tool_radius>]]]
+#<_lm_l2>=#<_y>
+$SD/Run=/Probing/_LateralMove.nc
+o1105 if [ABS[#<_lm_at1> - #<_lm_l1>] GT 0.050]
     (MSG: PROBE ERROR - obstruction while traversing to the standoff)
     (MSG: the probe stopped short, so nothing is where it expects)
     $Alarm/Send=3
@@ -63,31 +75,33 @@ o1105 if [ABS[#<_abs_x> - #<_tgx>] GT 0.050]
 o1105 endif
 o1106 if [#<_probe_lift> GT 0]
 G90
-G38.3 Z#<_probe_depth_z> F#<_probe_feed_link>
-o1107 if [ABS[#<_z> - #<_probe_depth_z>] GT 0.050]
+#<_ta_target>=#<_probe_depth_z>
+$SD/Run=/Probing/_ToolAxisZ.nc
+o1107 if [ABS[#<_ta_at> - #<_probe_depth_z>] GT 0.050]
     (MSG: PROBE ERROR - obstruction on the way down to probing depth)
     (MSG: the standoff is probably inside material, check the feature size)
     $Alarm/Send=3
     G4 P0.1
 o1107 endif
 o1106 endif
-#<_ps_ux>=1
-#<_ps_uy>=0
-#<_ps_uz>=0
+#<_ps_ux>=[#<_probe_lat_ux>]
+#<_ps_uy>=[#<_probe_lat_uy>]
+#<_ps_uz>=[#<_probe_lat_uz>]
 #<_ps_rotate>=1
 $SD/Run=/Probing/_ProbeSurface.nc
-#<_wxb>=#<_ps_x>
+#<_wxb>=[[#<_ps_wx> * #<_probe_lat_ux>] + [#<_ps_wy> * #<_probe_lat_uy>] + [#<_ps_wz> * #<_probe_lat_uz>]]
 
 #<_cx>=[[#<_wxa> + #<_wxb>] / 2]
 #<_probe_meas_x>=[ABS[#<_wxb> - #<_wxa>] + [2 * #<_probe_eff_radius>]]
 
 o1108 if [#<_probe_lift> GT 0]
 G90
-G0 Z#<_probe_retract_z>
+#<_ta_target>=#<_probe_retract_z>
+$SD/Run=/Probing/_ToolAxisZ.nc
 o1108 endif
 
 #<_probe_dev_size>=[#<_probe_meas_x> - #<_probe_width_x>]
-#<_probe_dev_pos>=[ABS[#<_cx> - #<_start_abs_x>]]
+#<_probe_dev_pos>=[ABS[#<_cx> - #<_start_l1>]]
 
 (--- declare the origin WITHOUT moving ---)
 (G10 L20 sets the offset from wherever the probe is standing:)
@@ -95,7 +109,16 @@ o1108 endif
 (so emitting  N + [P - found]  puts the origin on the feature)
 (without the probe ever driving back toward it.)
 o2704 if [#<_probe_set_origin> GT 0]
-G10 L20 P#<_probe_wcs> X[#<_probe_nom_x> + [#<_abs_x> - #<_cx>]]
+(--- declare the origin WITHOUT moving ---)
+(Where the probe stands, in the same three coordinates.)
+#<_o_l1>=[[#<_x> * #<_probe_lat_ux>] + [#<_y> * #<_probe_lat_uy>] + [#<_z> * #<_probe_lat_uz>]]
+#<_o_l2>=#<_y>
+#<_o_h>=[[#<_x> * #<_probe_axis_ux>] + [#<_y> * #<_probe_axis_uy>] + [#<_z> * #<_probe_axis_uz>]]
+#<_o_a>=[#<_probe_nom_l1> + [#<_o_l1> - #<_cx>]]
+#<_o_x>=[[#<_o_a> * #<_probe_lat_ux>] + [#<_o_h> * #<_probe_axis_ux>]]
+#<_o_y>=[[#<_o_a> * #<_probe_lat_uy>] + #<_o_l2> + [#<_o_h> * #<_probe_axis_uy>]]
+#<_o_z>=[[#<_o_a> * #<_probe_lat_uz>] + [#<_o_h> * #<_probe_axis_uz>]]
+G10 L20 P#<_probe_wcs> X#<_o_x> Y#<_o_y> Z#<_o_z>
 o2704 else
 (MSG: measure only - work offset left untouched)
 o2704 endif

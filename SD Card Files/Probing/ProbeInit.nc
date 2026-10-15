@@ -12,6 +12,29 @@
 (instead -- this file only fills in anything still missing, so a value)
 (set earlier always wins.)
 
+(================= VERSION HANDSHAKE =================)
+(This set of macros works in the WORK frame throughout. Earlier ones mixed)
+(it with G53 and #<_abs_*>, which are a different frame once TCP is on, and)
+(at B90 that was worth tens of millimetres of unasked-for travel.)
+()
+(A post built for the work-frame macros sets _probe_api_required. If the)
+(cards macros are older than that, stop HERE -- before any motion -- rather)
+(than discover it with the spindle moving.)
+()
+(This runs at the top of every probing macro, so one check covers them all.)
+(It can only fire if THIS file is current, so ProbeInit.nc is the one file)
+(that must always be copied across with the post.)
+#<_probe_api>=2
+o2370 if [EXISTS[#<_probe_api_required>]]
+o2371 if [#<_probe_api_required> GT #<_probe_api>]
+(MSG: PROBE ERROR - the probing macros on the SD card are out of date)
+(MSG: this post needs the work-frame macro set, copy all of /Probing across)
+$Alarm/Send=3
+G4 P0.1
+M30
+o2371 endif
+o2370 endif
+
 (================= CALIBRATION -- edit these =================)
 
 (================= SAFETY DEFAULTS =================)

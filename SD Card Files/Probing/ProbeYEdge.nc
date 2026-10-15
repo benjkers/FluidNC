@@ -13,11 +13,18 @@
 
 $SD/Run=/Probing/ProbeInit.nc
 
-#<_start_abs_x>=#<_abs_x>
-#<_start_abs_y>=#<_abs_y>
-#<_start_abs_z>=#<_abs_z>
+(--- where we started, in LATERAL-PLANE coordinates ---)
+(l1 is the written direction that comes out as machine X; l2 is written Y,)
+(which B never rotates. This used to capture #<_abs_*> for comparison with a)
+(part-frame result -- consistent, but neither of them a lateral once the part)
+(is indexed. Everything here is the WORK frame now.)
+#<_start_l1>=[[#<_x> * #<_probe_lat_ux>] + [#<_y> * #<_probe_lat_uy>] + [#<_z> * #<_probe_lat_uz>]]
+#<_start_l2>=#<_y>
 #<_dir>=#<_probe_axis_dir>
 
+(Touch along LATERAL 2, which is written Y. B turns about Y, so written Y is)
+(always the second lateral: this direction needs no basis vector and was)
+(never wrong. Kept exactly as it was.)
 #<_ps_ux>=0
 #<_ps_uy>=[#<_dir>]
 #<_ps_uz>=0
@@ -25,10 +32,10 @@ $SD/Run=/Probing/ProbeInit.nc
 $SD/Run=/Probing/_ProbeSurface.nc
 
 (--- true surface = averaged trigger + dir * effective radius ---)
-#<_surface>=[#<_ps_y> + [#<_dir> * #<_probe_eff_radius>]]
+#<_surface>=[#<_ps_wy> + [#<_dir> * #<_probe_eff_radius>]]
 
 (--- an edge has no size, only position ---)
-#<_expected>=#<_start_abs_y>
+#<_expected>=#<_start_l2>
 #<_probe_dev_pos>=[ABS[#<_surface> - #<_expected>]]
 #<_probe_dev_size>=0
 
@@ -43,7 +50,16 @@ $SD/Run=/Probing/_ProbeSurface.nc
 (tip radius and snap the stylus, and any over-travel past the deflection)
 (limit of the probe would do the same.)
 o2708 if [#<_probe_set_origin> GT 0]
-G10 L20 P#<_probe_wcs> Y[#<_probe_nom_y> + [#<_abs_y> - #<_surface>]]
+(Lateral 2 is written Y at any angle, so only the Y nominal is involved --)
+(but all three axes are written so the l1 and height readings are carried)
+(through unchanged rather than inherited.)
+#<_cur_l1>=[[#<_x> * #<_probe_lat_ux>] + [#<_y> * #<_probe_lat_uy>] + [#<_z> * #<_probe_lat_uz>]]
+#<_cur_h>=[[#<_x> * #<_probe_axis_ux>] + [#<_y> * #<_probe_axis_uy>] + [#<_z> * #<_probe_axis_uz>]]
+#<_o_b>=[#<_probe_nom_l2> + [#<_y> - #<_surface>]]
+#<_o_x>=[[#<_cur_l1> * #<_probe_lat_ux>] + [#<_cur_h> * #<_probe_axis_ux>]]
+#<_o_y>=[[#<_cur_l1> * #<_probe_lat_uy>] + #<_o_b> + [#<_cur_h> * #<_probe_axis_uy>]]
+#<_o_z>=[[#<_cur_l1> * #<_probe_lat_uz>] + [#<_cur_h> * #<_probe_axis_uz>]]
+G10 L20 P#<_probe_wcs> X#<_o_x> Y#<_o_y> Z#<_o_z>
 o2708 else
 (MSG: measure only - work offset left untouched)
 o2708 endif

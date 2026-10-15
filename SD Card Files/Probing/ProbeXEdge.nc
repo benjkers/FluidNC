@@ -13,22 +13,30 @@
 
 $SD/Run=/Probing/ProbeInit.nc
 
-#<_start_abs_x>=#<_abs_x>
-#<_start_abs_y>=#<_abs_y>
-#<_start_abs_z>=#<_abs_z>
+(--- where we started, in LATERAL-PLANE coordinates ---)
+(l1 is the written direction that comes out as machine X; l2 is written Y,)
+(which B never rotates. This used to capture #<_abs_*> for comparison with a)
+(part-frame result -- consistent, but neither of them a lateral once the part)
+(is indexed. Everything here is the WORK frame now.)
+#<_start_l1>=[[#<_x> * #<_probe_lat_ux>] + [#<_y> * #<_probe_lat_uy>] + [#<_z> * #<_probe_lat_uz>]]
+#<_start_l2>=#<_y>
 #<_dir>=#<_probe_axis_dir>
 
-#<_ps_ux>=[#<_dir>]
-#<_ps_uy>=0
-#<_ps_uz>=0
+(Touch along LATERAL 1. Written X is that direction only at B0 -- at B90 it)
+(is the tool axis, so this drove the stylus straight down instead of at the)
+(edge.)
+#<_ps_ux>=[#<_dir> * #<_probe_lat_ux>]
+#<_ps_uy>=[#<_dir> * #<_probe_lat_uy>]
+#<_ps_uz>=[#<_dir> * #<_probe_lat_uz>]
 #<_ps_rotate>=1
 $SD/Run=/Probing/_ProbeSurface.nc
 
 (--- true surface = averaged trigger + dir * effective radius ---)
-#<_surface>=[#<_ps_x> + [#<_dir> * #<_probe_eff_radius>]]
+#<_touch_l1>=[[#<_ps_wx> * #<_probe_lat_ux>] + [#<_ps_wy> * #<_probe_lat_uy>] + [#<_ps_wz> * #<_probe_lat_uz>]]
+#<_surface>=[#<_touch_l1> + [#<_dir> * #<_probe_eff_radius>]]
 
 (--- an edge has no size, only position ---)
-#<_expected>=#<_start_abs_x>
+#<_expected>=#<_start_l1>
 #<_probe_dev_pos>=[ABS[#<_surface> - #<_expected>]]
 #<_probe_dev_size>=0
 
@@ -43,7 +51,17 @@ $SD/Run=/Probing/_ProbeSurface.nc
 (tip radius and snap the stylus, and any over-travel past the deflection)
 (limit of the probe would do the same.)
 o2705 if [#<_probe_set_origin> GT 0]
-G10 L20 P#<_probe_wcs> X[#<_probe_nom_x> + [#<_abs_x> - #<_surface>]]
+(The edge was measured along LATERAL 1, so the origin shifts along lateral 1)
+(-- not along written X, which is a different direction once indexed. All)
+(three axes are written: the l2 and height terms reproduce the readings those)
+(axes already have, so they are no-ops, exactly as not naming them was at B0.)
+#<_cur_l1>=[[#<_x> * #<_probe_lat_ux>] + [#<_y> * #<_probe_lat_uy>] + [#<_z> * #<_probe_lat_uz>]]
+#<_cur_h>=[[#<_x> * #<_probe_axis_ux>] + [#<_y> * #<_probe_axis_uy>] + [#<_z> * #<_probe_axis_uz>]]
+#<_o_a>=[#<_probe_nom_l1> + [#<_cur_l1> - #<_surface>]]
+#<_o_x>=[[#<_o_a> * #<_probe_lat_ux>] + [#<_cur_h> * #<_probe_axis_ux>]]
+#<_o_y>=[[#<_o_a> * #<_probe_lat_uy>] + #<_y> + [#<_cur_h> * #<_probe_axis_uy>]]
+#<_o_z>=[[#<_o_a> * #<_probe_lat_uz>] + [#<_cur_h> * #<_probe_axis_uz>]]
+G10 L20 P#<_probe_wcs> X#<_o_x> Y#<_o_y> Z#<_o_z>
 o2705 else
 (MSG: measure only - work offset left untouched)
 o2705 endif

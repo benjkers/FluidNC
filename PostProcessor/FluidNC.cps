@@ -188,6 +188,12 @@ var gFormat = createFormat({prefix:"G", decimals:0});
 var mFormat = createFormat({prefix:"M", decimals:0});
 
 var xyzFormat = createFormat({decimals:(unit == MM ? 3 : 4)});
+// Direction cosines, not lengths. The macros multiply these by ABSOLUTE
+// positions -- _ToolAxisZ projects #<_x>/#<_y>/#<_z> on to the tool axis, the
+// b level projects #5061-3 -- so at 300 mm from the origin three decimals is
+// worth a quarter of a millimetre, five times the 0.050 tolerance the macros
+// alarm on. Six decimals puts it at 0.3 microns.
+var cosFormat = createFormat({decimals:6, forceDecimal:true});
 var abcFormat = createFormat({decimals:3, type:FORMAT_REAL, scale:DEG});
 var feedFormat = createFormat({decimals:(unit == MM ? 1 : 2)});
 var inverseTimeFormat = createFormat({decimals:3, type:FORMAT_REAL});
@@ -862,22 +868,50 @@ function writeProbeParams(extra) {
   // along this rather than along written Z, which is only the tool axis when
   // nothing is indexed -- see _ToolAxisZ.nc. Straight up on a 3-axis
   // definition, with TCP disabled, or at B0, so those are unchanged.
+  // Which macro set this post needs. ProbeInit.nc declares what the card has
+  // and stops before any motion if it is older -- the one protection against
+  // a new post driving the previous, machine-frame macros, which is how a
+  // retract ended up 67 mm off line and in the vise.
+  writeBlock("#<_probe_api_required>=2");
   var probeAxis = machineAxesInFrame().v;
-  writeBlock("#<_probe_axis_ux>=" + xyzFormat.format(probeAxis.x));
-  writeBlock("#<_probe_axis_uy>=" + xyzFormat.format(probeAxis.y));
-  writeBlock("#<_probe_axis_uz>=" + xyzFormat.format(probeAxis.z));
-  // ABSOLUTE heights straight from Fusion, projected on to that axis. They
-  // arrive as written Z values, which carry no orientation: at B90 a plane
-  // of constant written Z is a vertical plane, so two points on one flat
-  // face came through at different "heights". Projecting the POINT makes a
-  // height a height at any angle, and the unknown constant between the
-  // frames cancels because every consumer differences them.
-  var atRetract = new Vector(probePoint ? probePoint.x : 0, probePoint ? probePoint.y : 0,
-    cycle.retract !== undefined ? cycle.retract : 0);
-  var atDepth = new Vector(probePoint ? probePoint.x : 0, probePoint ? probePoint.y : 0,
-    probedSurfaceZ(probePoint ? probePoint.z : 0));
-  writeBlock("#<_probe_retract_z>=" + xyzFormat.format(toolAxisHeight(atRetract)));
-  writeBlock("#<_probe_depth_z>=" + xyzFormat.format(toolAxisHeight(atDepth)));
+  writeBlock("#<_probe_axis_ux>=" + cosFormat.format(probeAxis.x));
+  writeBlock("#<_probe_axis_uy>=" + cosFormat.format(probeAxis.y));
+  writeBlock("#<_probe_axis_uz>=" + cosFormat.format(probeAxis.z));
+  // The other lateral is written Y, which B never touches, so only this one
+  // has to be told. It is the written direction that comes out as machine X,
+  // and it is what the "X" faces of a boss, bore, wall or channel have to be
+  // probed along once the part is indexed -- written X stops being lateral
+  // the moment B leaves zero, and at B90 it IS the tool axis.
+  var probeLat = machineAxesInFrame().u;
+  writeBlock("#<_probe_lat_ux>=" + cosFormat.format(probeLat.x));
+  writeBlock("#<_probe_lat_uy>=" + cosFormat.format(probeLat.y));
+  writeBlock("#<_probe_lat_uz>=" + cosFormat.format(probeLat.z));
+  // ABSOLUTE heights, as tool-axis coordinates. Fusion hands them over as
+  // written Z values, which carry no orientation: at B90 a plane of constant
+  // written Z is a VERTICAL plane, so two points on one flat face arrive at
+  // different "heights".
+  //
+  // Projecting a POINT on to the tool axis fixes that, but only if the point
+  // is a real point. Building (px, py, retract) and (px, py, depth) and
+  // projecting both does NOT work: at B90 the tool axis is written X, the
+  // projection reads x alone, the two points share x, and retract and depth
+  // come out EQUAL -- which is what posted before this, and leaves the
+  // multi-touch macros with no lift between touches.
+  //
+  // So project the probe point once for the base height, and add each offset
+  // as a DISTANCE. cycle.retract and the depth are both heights in the
+  // cycle's own frame, so differencing them against probePoint.z cancels
+  // that frame's origin and leaves a pure distance along the tool axis,
+  // which is meaningful here. At B0 the base is probePoint.z and both
+  // reduce to the raw Fusion values, so nothing changes on a 3-axis
+  // definition, with TCP disabled, or un-indexed.
+  var pz = probePoint ? probePoint.z : 0;
+  var baseHeight = toolAxisHeight(new Vector(probePoint ? probePoint.x : 0,
+    probePoint ? probePoint.y : 0, pz));
+  var retractGap = (cycle.retract !== undefined ? cycle.retract : 0) - pz;
+  var depthGap = probedSurfaceZ(pz) - pz;
+  writeBlock("#<_probe_retract_z>=" + xyzFormat.format(baseHeight + retractGap));
+  writeBlock("#<_probe_depth_z>=" + xyzFormat.format(baseHeight + depthGap));
   writeBlock("#<_probe_lift>=" + ((extra && extra.lift) ? 1 : 0));
   // Fusion's "Print Results" checkbox. When set, each macro echoes the
   // measured centre, size and deviations to the console via PRINT, which
@@ -925,8 +959,37 @@ function writeProbeParams(extra) {
   if (extra && extra.nomY !== undefined) {
     writeBlock("#<_probe_nom_y>=" + xyzFormat.format(extra.nomY));
   }
+  // The same nominal in LATERAL-PLANE coordinates, which is what the macros
+  // now work in. l1 is the direction that comes out as machine X; l2 is
+  // written Y, which B never rotates.
+  //
+  // A feature's X and Y stop being its laterals the moment the part is
+  // indexed -- at B90 written X IS the tool axis -- so a nominal given as
+  // written X/Y cannot be compared with anything the probe measures. At B0
+  // l1 is written X and l2 written Y, so these equal the pair above and the
+  // macros behave exactly as they always did.
+  if (extra && (extra.nomX !== undefined || extra.nomY !== undefined)) {
+    // A REAL point, with its real written Z. Projecting (nomX, nomY, 0) would
+    // be wrong for the same reason the retract/depth pair was: at B90 l1 is
+    // written -Z, so a zeroed Z throws the whole coordinate away.
+    var nomPt = new Vector(extra.nomX || 0, extra.nomY || 0,
+      probedSurfaceZ(probePoint ? probePoint.z : 0));
+    if (extra.nomX !== undefined) {
+      writeBlock("#<_probe_nom_l1>=" + xyzFormat.format(machineSpanOf(nomPt)));
+    }
+    if (extra.nomY !== undefined) {
+      writeBlock("#<_probe_nom_l2>=" + xyzFormat.format(nomPt.y));
+    }
+  }
   if (extra && extra.nomZ !== undefined) {
     writeBlock("#<_probe_nom_z>=" + xyzFormat.format(extra.nomZ));
+    // The same nominal as a TOOL-AXIS height, which is what a surface probe
+    // actually measures. A Z nominal is only a height at B0; at B90 a plane
+    // of constant written Z is vertical. The point is projected whole, for
+    // the same reason the lateral nominals are.
+    var nomSurf = new Vector(probePoint ? probePoint.x : 0,
+      probePoint ? probePoint.y : 0, extra.nomZ);
+    writeBlock("#<_probe_nom_h>=" + xyzFormat.format(toolAxisHeight(nomSurf)));
   }
   // Fusion exposes explicit enable flags for each tolerance, so use those
   // rather than inferring from the value:
@@ -1036,28 +1099,41 @@ function protectedMove(words) {
   writeBlock("G38.3 " + parts.join(" ") + " " + feed);
 }
 
+function toolAxisMoveTo(writtenZ) {
+  // Move to the height a written Z corresponds to, along the TOOL AXIS.
+  //
+  // A bare Z word is only a height when nothing is indexed. At B90 written Z
+  // is a lateral direction, so "descend to the retract plane" used to traverse
+  // sideways instead -- which is how the probe arrived nowhere near the
+  // feature. Projecting the POINT gives a height at any angle, and
+  // _ToolAxisZ.nc turns that height back into the right combination of words.
+  //
+  // At B0, and on a 3-axis or TCP-disabled job, the projection returns the
+  // written Z unchanged and the macro emits the same single protected Z move
+  // as before, at the same feed.
+  var p = new Vector(probePoint ? probePoint.x : 0, probePoint ? probePoint.y : 0, writtenZ);
+  writeBlock("#<_ta_target>=" + xyzFormat.format(toolAxisHeight(p)));
+  writeBlock("$SD/Run=/Probing/_ToolAxisZ.nc");
+}
+
 function safeMoveZ(targetZ) {
-  // EVERY Z move made with the probe in the spindle is a PROTECTED move.
-  // Not just the part below the retract plane -- the descent from the
-  // clearance plane down to retract can still meet a clamp, a fixture or a
-  // part that is not where CAM thinks, and a rapid there snaps the stylus.
-  // G38.3 stops on contact instead, and unlike G38.2 it does not alarm if
-  // nothing is touched, so it behaves as a positioning move when the path
-  // is clear.
+  // EVERY move made with the probe in the spindle is a PROTECTED move. Not
+  // just the part below the retract plane -- the descent from the clearance
+  // plane down to retract can still meet a clamp, a fixture or a part that is
+  // not where CAM thinks, and a rapid there snaps the stylus. _ToolAxisZ uses
+  // G38.3, which stops on contact and, unlike G38.2, does not alarm when
+  // nothing is touched, so it behaves as a positioning move when clear.
   //
   // Speed is Fusion's LINK feed rate, which exists precisely for probe
-  // positioning moves. Falls back to the cycle feed if the operation did
-  // not supply one.
-  var retract  = (cycle.retract !== undefined) ? cycle.retract : targetZ;
-
+  // positioning moves.
+  var retract = (cycle.retract !== undefined) ? cycle.retract : targetZ;
   if (targetZ >= retract) {
-    protectedMove([zOutput.format(targetZ)]);
+    toolAxisMoveTo(targetZ);
     return;
   }
-  // Two stages so the change of plane is visible in the output, but both
-  // are protected.
-  protectedMove([zOutput.format(retract)]);
-  protectedMove([zOutput.format(targetZ)]);
+  // Two stages so the change of plane is visible in the output, both protected.
+  toolAxisMoveTo(retract);
+  toolAxisMoveTo(targetZ);
 }
 
 // Stand the probe off from a surface before an edge touch, so the macro's
@@ -1107,14 +1183,24 @@ function probeAxisEdge(axis, dir, ax, ay, z) {
   var surfaceX = (axis == "X") ? (ax + dir * so) : ax;
   var surfaceY = (axis == "Y") ? (ay + dir * so) : ay;
   writeProbeParams({nomX: surfaceX, nomY: surfaceY});
-  // Position in XY FIRST, while still high, and only then descend. The
-  // corner cycles offset the approach point from the corner, so traversing
-  // at probing depth could drag the stylus through the part.
-  protectedMove([xOutput.format(ax), yOutput.format(ay)]);
+  // Position in the LATERAL PLANE first, while still high, and only then
+  // descend. The corner cycles offset the approach point from the corner, so
+  // traversing at probing depth could drag the stylus through the part.
+  //
+  // Written X and Y are the laterals only at B0; at B90 written X is the tool
+  // axis, so moving there would plunge rather than cross. _LateralMove.nc
+  // takes the two lateral coordinates and holds the height, at any angle.
+  var approach = new Vector(ax, ay, probedSurfaceZ(z));
+  writeBlock("#<_lm_l1>=" + xyzFormat.format(machineSpanOf(approach)));
+  writeBlock("#<_lm_l2>=" + xyzFormat.format(approach.y));
+  writeBlock("$SD/Run=/Probing/_LateralMove.nc");
   if (z !== undefined) {
     safeMoveZ(probedSurfaceZ(z));
   }
+  // Which lateral the edge is on, and which way to go. l1 for an X edge,
+  // l2 for a Y edge -- the macro picks its direction vector from this.
   writeBlock("#<_probe_axis_dir>=" + dir);
+  writeBlock("#<_probe_edge_lat>=" + (axis == "X" ? 1 : 2));
   runProbeMacro("Probe" + axis + "Edge.nc");
 }
 
@@ -1185,47 +1271,88 @@ function bLevelWanted() {
 }
 
 function bLevelBefore() {
-  // Deliberately does NOT force TCP off any more.
+  // Deliberately does NOT force TCP off.
   //
-  // The old reasoning was that #5061/#5063 are machine coordinates so the
-  // touches had to be taken outside the transform. That was simply wrong:
-  // those parameters come from steps_to_mpos, so they are raw machine
-  // positions whatever M128/M129 is doing, and ProbeBLevel's arithmetic is
-  // unaffected either way.
+  // Forcing M129 here changed the frame under every coordinate written after
+  // it, while the post carried on emitting Fusion's part-frame numbers --
+  // which is what left the two touches retracting to unrelated heights.
   //
-  // What the forced M129 DID do was change the frame under every coordinate
-  // written after it, while the post carried on emitting Fusion's part-frame
-  // numbers -- which is what left the two touches retracting to unrelated
-  // heights.
+  // It was justified at the time by the claim that #5061/#5063 are raw
+  // machine positions whatever M128/M129 is doing. That claim is FALSE, and
+  // worth recording because a lot was built on it: those parameters come from
+  // steps_to_mpos(), which ends in motors_to_cartesian(), which for
+  // TCPCartesian applies inverse(). So with TCP active they are UN-ROTATED
+  // part-frame coordinates -- the work frame plus a constant wco, not the
+  // machine frame. Same orientation as the work frame, so they are sound in
+  // DIFFERENCES and wrong as absolutes. bLevelAfter() relies on exactly that.
+}
+
+// A probed point projected on to a direction, as a G-code expression.
+//
+// Collapses to the bare parameter when the direction is a unit axis, so B0, a
+// 3-axis definition and a TCP-disabled job emit character for character what
+// they emitted before any of this existed.
+function probeDot(vec, ids) {
+  var c = [vec.x, vec.y, vec.z];
+  var i;
+  for (i = 0; i < 3; ++i) {
+    if (Math.abs(Math.abs(c[i]) - 1) < 1e-9 &&
+        Math.abs(c[(i + 1) % 3]) < 1e-9 && Math.abs(c[(i + 2) % 3]) < 1e-9) {
+      return c[i] < 0 ? "[0 - " + ids[i] + "]" : ids[i];
+    }
+  }
+  var terms = [];
+  for (i = 0; i < 3; ++i) {
+    if (Math.abs(c[i]) > 1e-9) {
+      terms.push("[" + ids[i] + " * " + cosFormat.format(c[i]) + "]");
+    }
+  }
+  return terms.length ? "[" + terms.join(" + ") + "]" : "0";
 }
 
 function bLevelAfter(px, py, z) {
   var n = (bLevelPointCount % 2) + 1; // 1, 2, 1, 2, ... -- pairs in order
   ++bLevelPointCount;
-  // ProbeBLevel solves in the MACHINE frame: it reads #5061/#5063, which are
-  // machine X and Z. So the nominals it is given have to be machine X and Z
-  // too, not Fusion's written X and Z.
+  // ProbeBLevel solves a right triangle: _bl_x* is the LATERAL run along the
+  // face, _bl_z* the HEIGHT, and _bl_nz* the nominal height. Those roles are
+  // fixed in the macro, but which written axis fills each one is not: at B0
+  // lateral is written X and height is written Z; at B90 they swap over.
   //
-  // That is the whole reason two points on ONE surface were coming through
-  // with different nominal heights. At B90 the surface is a plane of constant
-  // written X, and the written Z that was being passed as the height is a
-  // LATERAL coordinate -- so a flat face looked like an 80 mm step and the
-  // solver would have read a wild tilt off it.
+  // So BOTH sides have to be projected, on to the same pair of directions.
+  // Projecting only the nominals -- which is what shipped first -- handed the
+  // solver a measured lateral run of 0.000 against a nominal of 20.639 and it
+  // wrote the resulting nonsense straight to the B offset.
   //
-  // Projecting onto the tool axis makes a height a height at any angle, and
-  // onto u makes the span a span. The constant offset between the frames
-  // cancels because the macro differences the two points.
+  // The projection is legitimate on the measured side because #5061-3 are
+  // part-frame, i.e. the work frame plus a constant: same orientation, so the
+  // basis applies, and the constant cancels when the macro differences the
+  // two points. See bLevelBefore() for why they are NOT machine coordinates.
+  // NOT #5061-5063. Those hold the position of the LAST G38 of any kind, and
+  // mc_probe_cycle updates them even when a G38.3 completes without touching
+  // anything -- "if (probing) { if (no_error) { get_steps(probe_steps); } }".
+  // _ProbeSurface ends by driving the probe back to its standoff with a
+  // protected G38.3, so by the time this runs #5061-3 describe the STANDOFF,
+  // not the touch.
+  //
+  // That is not a subtle error. Both points report the same standoff height,
+  // so the measured rise is exactly zero and the solve returns 0.0000 deg for
+  // any part, however it is sitting. A real run read 0.0000 against a true
+  // 0.2387.
+  //
+  // _ps_wx/_ps_wy/_ps_wz are the averaged TOUCH, in work coordinates, saved
+  // by _ProbeSurface before that return move and untouched afterwards.
+  var ax = machineAxesInFrame();
+  var ids = ["#<_ps_wx>", "#<_ps_wy>", "#<_ps_wz>"];
   var surface = new Vector(px, py, probedSurfaceZ(z));
   writeComment("B level point " + n + " captured");
-  writeBlock("#<_bl_x" + n + ">=#5061");
-  writeBlock("#<_bl_y" + n + ">=#5062");
-  writeBlock("#<_bl_z" + n + ">=#5063");
+  writeBlock("#<_bl_x" + n + ">=" + probeDot(ax.u, ids));   // lateral
+  writeBlock("#<_bl_y" + n + ">=#<_ps_wy>");                // machine Y, never rotated
+  writeBlock("#<_bl_z" + n + ">=" + probeDot(ax.v, ids));   // height, along the tool axis
   writeBlock("#<_bl_nx" + n + ">=" + xyzFormat.format(machineSpanOf(surface)));
   writeBlock("#<_bl_nz" + n + ">=" + xyzFormat.format(toolAxisHeight(surface)));
   if (n == 1) {
     return;
   }
-  writeBlock("#<_bl_mode>=1");
   writeBlock("#<_bl_wcs>=" + B_LEVEL_OFFSET);
   runProbeMacro("ProbeBLevel.nc");
   // The macro has just changed the offset's B component WITHOUT moving
