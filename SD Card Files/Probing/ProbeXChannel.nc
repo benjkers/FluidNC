@@ -103,6 +103,17 @@ o1108 endif
 #<_probe_dev_size>=[#<_probe_meas_x> - #<_probe_width_x>]
 #<_probe_dev_pos>=[ABS[#<_cx> - #<_start_l1>]]
 
+
+(--- finish at the measured centre ---)
+(Fusion ends the cycle back over the feature centre, so the machine does too:)
+(the path it simulated is the path that runs, start to finish.)
+()
+(The probe is at the retract height by now, and the centre is where the cycle)
+(started, so this is the mirror of the move out to the first face.)
+#<_lm_l1>=#<_cx>
+#<_lm_l2>=#<_y>
+$SD/Run=/Probing/_LateralMove.nc
+
 (--- declare the origin WITHOUT moving ---)
 (G10 L20 sets the offset from wherever the probe is standing:)
 (    offset = MPos - TLO - value)
