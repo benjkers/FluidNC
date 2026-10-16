@@ -23,7 +23,9 @@
 #include "Job.h"
 #include "Driver/restart.h"
 #include "Driver/watchdog.h"
-#include "Driver/heap.h"  // platform_max_free_block()
+#include "Driver/heap.h"
+#include "Driver/Console.h"  // Console
+#include <cstdio>            // snprintf  // platform_max_free_block()
 
 #include <cstring>  // strncpy
 #include <memory>   // std::unique_ptr
@@ -220,6 +222,21 @@ static uint32_t heapLowWaterReportTime = 0;
 // returns 0 (no API).
 uint32_t maxBlockLowWater = UINT_MAX;
 
+// Deliberately allocation-free.  This fires when the heap is nearly gone, and
+// the normal logging path builds a std::string to do its work.  At the point
+// where that allocation fails, the runtime cannot allocate the std::bad_alloc
+// object either, so it calls std::terminate() outright and no catch block can
+// intervene - the warning that you are about to run out of memory must not be
+// the thing that finishes you off.  Straight to the console for the same
+// reason: whatever is consuming the heap is often the network stack.
+static void report_low_memory(uint32_t bytes) {
+    char msg[48];
+    int  len = snprintf(msg, sizeof(msg), "[MSG:WARN: Low memory: %u bytes]\n", static_cast<unsigned>(bytes));
+    if (len > 0) {
+        Console.write(reinterpret_cast<const uint8_t*>(msg), static_cast<size_t>(len));
+    }
+}
+
 // Heap instrumentation.  Called from poll_once(), i.e. on SUPPORT_TASK_CORE,
 // so none of it lands on the motion core: xPortGetFreeHeapSize() is a cheap
 // counter read, but platform_max_free_block() walks the free list under the
@@ -258,7 +275,7 @@ static void heap_monitor_poll() {
         // report, but the true minimum is reported eventually, and large drops are reported immediately.
         uint32_t ticksSinceReported = (getCpuTicks() - heapLowWaterReportTime);
         if ((heapLowWater < heapLowWaterReported - 2048) || (ticksSinceReported > (uint32_t)usToCpuTicks(200000))) {
-            //                log_warn("Low memory: " << heapLowWater << " bytes");
+            report_low_memory(heapLowWater);
             heapLowWaterReported   = heapLowWater;
             heapLowWaterReportTime = getCpuTicks();
         }
@@ -299,8 +316,16 @@ static void poll_once() {
 
         heap_monitor_poll();
 
+        // Checks unwind_cause against the job stack and aborts atomically
+        // with it, so a nest() that concurrently starts a fresh job (and
+        // clears the flag itself) can't be seen mid-transition and have its
+        // brand-new job killed by a cause meant for whatever used to be on
+        // the stack (FluidNC issue #1861).
+        if (Job::consume_unwind_cause()) {
+            return;
+        }
+
         if (!Job::active()) {
-            unwind_cause = nullptr;
             // No job: every line goes to cmd_queue.  Gate on queue room so a
             // slow consumer bounds read-ahead - the flow control the old
             // single slot gave.
@@ -311,12 +336,6 @@ static void poll_once() {
             if (state_is(State::Alarm) || state_is(State::ConfigAlarm) || state_is(State::Critical)) {
                 log_debug("Unwinding from Alarm");
                 Job::abort();
-                unwind_cause = nullptr;
-                return;
-            }
-            if (unwind_cause) {
-                Job::abort();
-                unwind_cause = nullptr;
                 return;
             }
 
@@ -358,7 +377,7 @@ static void poll_once() {
                                              static_cast<int>(status) << " (" << errorString(status) << ") in "
                                                                       << channel->name() << " at line " << channel->lineNumber());
                             }
-                            Job::abort();
+                            Job::abort(status);
                             break;
                         }
                     }
@@ -459,6 +478,11 @@ void protocol_main_loop() {
         if (xQueueReceive(cmd_queue, &item, 0)) {
             Channel* channel = item.channel;
             if (channel->is_closing()) {
+                // No ack() -- the channel is on its way out -- but still
+                // clear its pending-ack gate: the ref release just below is
+                // what actually lets it be reaped, so nothing else will ever
+                // ack this line for it (see Channel::_pending_ack).
+                channel->clear_pending_ack();
                 channel->release_processing_ref();
             } else {
                 if (gcode_echo->get()) {
@@ -516,13 +540,35 @@ void protocol_main_loop() {
                     }
                 }
 
-                Error status_code = execute_line(item.line, *out_channel, AuthenticationLevel::LEVEL_GUEST, true);
+                // Job::dispatch_channel, not out_channel (which execute_line()
+                // itself is called with, and may be the job leader instead of
+                // `channel` -- see its declaration), is what a deferred ack
+                // started by this line must target: it is `channel` that
+                // holds the processing ref this dispatch will skip releasing
+                // below on Error::Deferred.
+                Job::dispatch_channel = channel;
+                Error status_code     = execute_line(item.line, *out_channel, AuthenticationLevel::LEVEL_GUEST, true);
+                Job::dispatch_channel = nullptr;
 
-                // If the line was aborted, the channel could be invalid.
-                if (!sys.abort()) {
-                    channel->ack(status_code);
+                // Error::Deferred means the line started a job (M6's
+                // tool-change macro, $SD/Run, $LocalFS/Run) whose completion
+                // -- not this dispatch -- owns the ack; see Job::nest()'s
+                // ack_channel argument and FluidNC issue #1862. Hold this
+                // LineItem's processing ref until then, same as the other
+                // Error::Deferred producers in this file.
+                if (status_code != Error::Deferred) {
+                    // If the line was aborted, avoid writing a stale reply
+                    // to the channel mid-teardown -- but still clear its
+                    // pending-ack gate (Channel::_pending_ack), or it would
+                    // never accept another line: nothing else is going to
+                    // ack this one now.
+                    if (!sys.abort()) {
+                        channel->ack(status_code);
+                    } else {
+                        channel->clear_pending_ack();
+                    }
+                    channel->release_processing_ref();
                 }
-                channel->release_processing_ref();
             }
         }
 
@@ -1139,6 +1185,15 @@ static void protocol_do_late_reset() {
 
     sys.set_abort(true);
 
+    // Kill whatever job is on the stack right here, synchronously, instead of
+    // only setting unwind_cause for polling_loop (a separate task) to notice
+    // and act on later. restartEvent - queued by our caller right after this
+    // - runs after_reset via Job::nest() on this same task; if that raced
+    // ahead of polling_loop's abort, the freshly nested after_reset job would
+    // still find the old job on the stack and inherit the abort meant for it
+    // (FluidNC issue #1861). Aborting here guarantees the stack is empty
+    // before after_reset ever nests.
+    Job::abort();
     unwind_cause = "Reset";
 }
 

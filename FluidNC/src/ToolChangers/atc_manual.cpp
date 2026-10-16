@@ -48,17 +48,17 @@ namespace ATCs {
 
     void Manual_ATC::probe_notification() {}
 
-    bool Manual_ATC::tool_change(tool_t new_tool, bool pre_select, bool set_tool, bool master_gauge, bool has_manual_gauge,
-                                  float manual_gauge_value) {
-        bool spindle_was_on = false;  // used to restore the spindle state
-        bool was_inch_mode  = false;  // allows use to restore inch mode if req'd
-
+    bool Manual_ATC::tool_change(tool_t new_tool, bool pre_select, bool set_tool, Channel* channel, bool master_gauge,
+                                 bool has_manual_gauge, float manual_gauge_value) {
         if (master_gauge) {
-            // Manual_ATC has no rack, so there is nothing to (re)master.
+            // Manual_ATC has no rack, so there is nothing to (re)master, and
+            // no job was started, so there is no ack to defer.
             log_info("Manual_ATC:" << name() << " has no rack tools to master, ignoring M101");
-            return true;
+            return false;
         }
-
+        bool spindle_was_on       = (gc_state.modal.spindle != SpindleState::Disable);   // used to restore the spindle state
+        bool was_inch_mode        = (gc_state.modal.units == Units::Inches);             // allows use to restore inch mode if req'd
+        bool was_incremental_mode = (gc_state.modal.distance == Distance::Incremental);  // was G91 active
         protocol_buffer_synchronize();  // wait for all motion to complete
         _macro.erase();                 // clear previous gcode
 
@@ -68,8 +68,7 @@ namespace ATCs {
             if (new_tool == 0) {
                 reset();  // clear TLO
             }
-            _macro.run(nullptr);
-            return true;
+            return _macro.run(channel, true);
         }
 
         // M6T0 is used to reset this ATC and allow us to start a new job
@@ -78,8 +77,7 @@ namespace ATCs {
             move_to_safe_z();
             move_to_change_location();
             reset();
-            _macro.run(nullptr);
-            return true;
+            return _macro.run(channel, true);
         }
 
         if (gc_state.modal.plane_select != Plane::XY) {
@@ -101,9 +99,8 @@ namespace ATCs {
                 if (was_inch_mode) {
                     _macro.addf("G20");
                 }
-                _macro.run(nullptr);
                 _prev_tool = new_tool;
-                return true;
+                return _macro.run(channel, true);
             }
 
             _prev_tool = new_tool;
@@ -159,9 +156,7 @@ namespace ATCs {
             }
 
 
-            _macro.run(nullptr);
-
-            return true;
+            return _macro.run(channel, true);
         } catch (...) { log_info("Exception caught"); }
 
         return false;

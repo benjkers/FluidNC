@@ -48,10 +48,13 @@ namespace Spindles {
             if (candidate != spindle) {  // we are changing spindles
                 gc_state.selected_tool = new_tool;
                 spindle                = candidate;
-                spindle_isr_speed_fn   = candidate->isr_speed_fn();
                 new_spindle            = true;
                 log_info("Changed to spindle:" << spindle->name());
             }
+            // Keep the ISR-safe speed thunk in sync with spindle even when it was
+            // already pointed at candidate by some other path (e.g. MachineConfig's
+            // precautionary assignment), so it is never left null after this call.
+            spindle_isr_speed_fn = candidate->isr_speed_fn();
         } else {
             if (spindle == nullptr) {
                 if (spindles.size() == 0) {
@@ -128,32 +131,32 @@ namespace Spindles {
 
     // pre_select is generally ignored except for machines that need to get a tool ready
     // set_tool is just used to tell the atc what is already installed.
-    bool Spindle::tool_change(uint32_t tool_number, bool pre_select, bool set_tool, bool master_gauge, bool has_manual_gauge,
-                               float manual_gauge_value) {
+    bool Spindle::tool_change(uint32_t tool_number, bool pre_select, bool set_tool, Channel* channel, bool master_gauge,
+                              bool has_manual_gauge, float manual_gauge_value) {
         if (_atc != NULL) {
             log_info(_name << " spindle changed to tool:" << tool_number << " using " << _atc_name);
-            return _atc->tool_change(tool_number, pre_select, set_tool, master_gauge, has_manual_gauge, manual_gauge_value);
+            return _atc->tool_change(tool_number, pre_select, set_tool, channel, master_gauge, has_manual_gauge, manual_gauge_value);
         }
         if (master_gauge) {
-            // Nothing to master for a plain macro-based (non-ATC) tool changer.
-            return true;
+            // Nothing to master for a plain macro-based (non-ATC) tool changer,
+            // and no job was started, so there is no ack to defer.
+            return false;
         }
         if (!_m6_macro.get().empty()) {
             if (pre_select) {
-                return true;
+                return false;
             }
             _last_tool = tool_number;
             if (set_tool) {
-                return true;
+                return false;
             }
-            _m6_macro.run(nullptr);
             // What happens if the macro failed...set alarm in macro & test here?
             //gc_state.current_tool = gc_state.selected_tool;
-            return true;
+            return _m6_macro.run(channel, true);
             //}
         }
 
-        return true;
+        return false;
     }
 
     uint32_t Spindle::maxSpeed() {

@@ -66,14 +66,19 @@ namespace Spindles {
         virtual void   config_message() = 0;
         virtual bool   isRateAdjusted();
         virtual tool_t get_current_tool_num() { return _current_tool; }
-        virtual bool   tool_change(uint32_t tool_number, bool pre_select, bool set_tool, bool master_gauge = false,
-                                   bool has_manual_gauge = false, float manual_gauge_value = 0.0f);
+        // channel: the channel whose command line (M6, M61) triggered this
+        // call, threaded down to a macro/ATC that may run asynchronously so
+        // that command's ack can be deferred to the macro's completion
+        // instead of being sent immediately (FluidNC issue #1862). Returns
+        // true if a macro/job was actually started -- the caller must know
+        // this to decide whether to return Error::Deferred.
+        virtual bool tool_change(uint32_t tool_number, bool pre_select, bool set_tool, Channel* channel = nullptr,
+                                 bool master_gauge = false, bool has_manual_gauge = false, float manual_gauge_value = 0.0f);
         // M52 Pn - adaptive feed control. P is a torque-fraction goal
         // (e.g. 0.5 = target 50% torque), clamped to a max of 0.9; P0 (or
         // any value <= 0) disables goal-seeking. Default is a no-op for
         // spindles/protocols that don't support load-based throttling.
         virtual void   set_adaptive_feed(float goal_fraction) {}
-
         virtual void setSpeedfromISR(uint32_t dev_speed) = 0;
 
         // Reaching setSpeedfromISR() through the vtable is not safe from the

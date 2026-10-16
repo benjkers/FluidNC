@@ -10,6 +10,7 @@
 #include "Configuration/RuntimeSetting.h"
 #include "Configuration/AfterParse.h"
 #include "Configuration/Validator.h"
+#include "Driver/watchdog.h"  // feed_watchdog()
 #include "Machine/Axes.h"
 #include "Regexpr.h"
 #include "WebUI/Authentication.h"
@@ -631,7 +632,7 @@ static Error doJog(const char* value, AuthenticationLevel auth_level, Channel& o
         char jogLine[LINE_BUFFER_SIZE];
         strcpy(jogLine, "$J=");
         strcat(jogLine, value);
-        return gc_execute_line(jogLine);
+        return gc_execute_line(jogLine, out);
     } else {
         return Error::InvalidStatement;
     }
@@ -921,7 +922,10 @@ static Error uartPassthrough(const char* value, AuthenticationLevel auth_level, 
 
     TickType_t last_ticks = xTaskGetTickCount();
 
+    // A passthrough session lasts as long as traffic keeps flowing - flashing
+    // a pendant through it takes minutes - so keep the task watchdog fed.
     while (xTaskGetTickCount() - last_ticks < timeout) {
+        feed_watchdog();
         size_t len;
         len = out.timedReadBytes((char*)buffer, buflen, 10);
         if (len > 0) {
@@ -1391,8 +1395,8 @@ Error execute_line(const char* line, Channel& channel, AuthenticationLevel auth_
     if (state_is(State::Alarm) || state_is(State::ConfigAlarm) || state_is(State::Jog)) {
         return Error::SystemGcLock;
     }
-    Error result = gc_execute_line(line);
-    if (result != Error::Ok && result != Error::Reset) {
+    Error result = gc_execute_line(line, channel);
+    if (result != Error::Ok && result != Error::Reset && result != Error::Deferred) {
         log_error_to(channel, "Bad GCode: " << line);
         if (Job::active()) {
             send_alarm(ExecAlarm::GCodeError);
