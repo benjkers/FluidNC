@@ -59,3 +59,16 @@ o2510 endif
 (assume the target -- which is also why this is a projection and not just)
 (_ta_target echoed.)
 #<_ta_at>=[[#<_x> * #<_probe_axis_ux>] + [#<_y> * #<_probe_axis_uy>] + [#<_z> * #<_probe_axis_uz>]]
+
+(=================== DID IT ARRIVE? ===================)
+(G38.3 stops on contact without alarming, so a blocked move looks exactly)
+(like a completed one unless it is checked. Callers used to be responsible)
+(for that and not all of them were -- the post's own descent to the retract)
+(height was unchecked. Doing it here covers every caller.)
+(See _SafeMove.nc for why the stop is an alarm and not an M30.)
+o2520 if [ABS[#<_ta_at> - #<_ta_target>] GT 0.050]
+(PRINT, STOPPED - tool axis move touched something )
+(PRINT,   wanted height %.3f#<_ta_target>  reached %.3f#<_ta_at>  )
+$Alarm/Send=3
+G4 P0.1
+o2520 endif

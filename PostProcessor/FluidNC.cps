@@ -166,6 +166,14 @@ properties = {
     value      : false,
     scope      : "post"
   },
+  probeRapidFeed: {
+    title      : "Probe: positioning feed",
+    description: "Feed rate for positioning moves while a probe is in the spindle. Every such move is a PROTECTED move (G38.3), which stops on contact rather than snapping the stylus, so a probing section has no true rapid and this replaces one. Each move is checked afterwards and the program alarms if it did not arrive.",
+    group      : "preferences",
+    type       : "number",
+    value      : 6000,
+    scope      : "post"
+  },
   probeDumpCycleProps: {
     title      : "Probe: dump cycle properties",
     description: "Diagnostic only. Writes every property Fusion exposes on a probing cycle into the output as comments, so the real property names and values can be read off. Leave off for normal use.",
@@ -855,6 +863,10 @@ function writeProbeParams(extra) {
   // made with the probe in the spindle is a G38.3, so this is how fast it
   // travels before it meets anything.
   writeBlock("#<_probe_feed_link>=" + feedFormat.format(probeFeedLink ? probeFeedLink : cycle.feedrate));
+  // Positioning feed. Every move made with the probe in the spindle is a
+  // PROTECTED move -- G38.3, which stops on contact -- so a probing section
+  // has no true rapid, and this is what replaces one.
+  writeBlock("#<_probe_feed_rapid>=" + feedFormat.format(getProperty("probeRapidFeed", 6000)));
   // Nominal stylus radius from the tool library. ProbeInit.nc uses this
   // only as the FALLBACK for #<_probe_yaw> -- the calibrated effective
   // X/Y probe radius -- so probing still works before yaw is calibrated.
@@ -1074,6 +1086,26 @@ function probedSurfaceZ(z) {
 // next operation and suppress it -- so the protected moves would inherit
 // F50 from the previous macro and crawl. Resetting forces it out every
 // time, which costs one word and removes the whole class of problem.
+// A positioning move that is protected AND confirmed.
+//
+// protectedMove below emits the G38.3 but cannot check the result: the modal
+// formatter may have dropped words, so it no longer knows the whole target.
+// _SafeMove.nc is given all three and alarms if the machine did not get
+// there -- which matters because G38.3 does NOT alarm on contact, so a
+// blocked positioning move otherwise looks exactly like a completed one and
+// every following line runs from the wrong place.
+//
+// forceXYZ() afterwards because the move happened inside a macro: the post's
+// modal trackers never saw it, so the next block must write every word
+// instead of suppressing one it wrongly believes is unchanged.
+function safeMove(x, y, z) {
+  writeBlock("#<_sm_x>=" + xyzFormat.format(x));
+  writeBlock("#<_sm_y>=" + xyzFormat.format(y));
+  writeBlock("#<_sm_z>=" + xyzFormat.format(z));
+  writeBlock("$SD/Run=" + PROBING_DIR + "_SafeMove.nc");
+  forceXYZ();
+}
+
 function protectedMove(words) {
   // Drop any axis word the modal formatter suppressed. If nothing is left
   // the probe is already where we want it, and a bare "G38.3 F..." with no
@@ -1114,6 +1146,7 @@ function toolAxisMoveTo(writtenZ) {
   var p = new Vector(probePoint ? probePoint.x : 0, probePoint ? probePoint.y : 0, writtenZ);
   writeBlock("#<_ta_target>=" + xyzFormat.format(toolAxisHeight(p)));
   writeBlock("$SD/Run=/Probing/_ToolAxisZ.nc");
+  forceXYZ(); // moved inside a macro -- the modal trackers did not see it
 }
 
 function safeMoveZ(targetZ) {
@@ -1194,6 +1227,7 @@ function probeAxisEdge(axis, dir, ax, ay, z) {
   writeBlock("#<_lm_l1>=" + xyzFormat.format(machineSpanOf(approach)));
   writeBlock("#<_lm_l2>=" + xyzFormat.format(approach.y));
   writeBlock("$SD/Run=/Probing/_LateralMove.nc");
+  forceXYZ(); // moved inside a macro -- the modal trackers did not see it
   if (z !== undefined) {
     safeMoveZ(probedSurfaceZ(z));
   }
@@ -1218,11 +1252,7 @@ function probeZSurface(px, py, z) {
   // plunge along the tool axis rather than a three-axis diagonal.
   var ax = machineAxesInFrame();
   var standoff = cycle.probeClearance || 0;
-  protectedMove([
-    xOutput.format(px + ax.v.x * standoff),
-    yOutput.format(py + ax.v.y * standoff),
-    zOutput.format(surfaceZ + ax.v.z * standoff)
-  ]);
+  safeMove(px + ax.v.x * standoff, py + ax.v.y * standoff, surfaceZ + ax.v.z * standoff);
 
   // Which way the surface lies, in the written frame. _ProbeSurface is
   // already vector driven and fully relative, so this is all it needs to
@@ -3451,7 +3481,21 @@ function writeInitialPositioning(position, isRequired, codes1, codes2) {
     // getTcpApproachAxis() returns nothing when the tool axis is already the
     // written Z, so an un-indexed section, a TCP-disabled job and a 3-axis
     // machine all fall through to the stock pair below, untouched.
-    if (getTcpApproachAxis()) {
+    // In a PROBING section there is no true rapid: every positioning move is
+    // protected and confirmed, so the approach goes through _SafeMove.nc like
+    // the rest of them. The modal and additional codes still have to be
+    // written -- they carry G90/G17 and whatever the caller passed -- so they
+    // go out on their own block first.
+    //
+    // Milling sections are untouched: their rapids stay G0.
+    if (isProbeOperation()) {
+      var pre = formatWords(modalCodes, getLengthCompCode(), additionalCodes[0], additionalCodes[1]);
+      if (pre) {
+        writeBlock(pre);
+      }
+      safeMove(position.x, position.y, position.z);
+      machineSimulation({x:position.x, y:position.y, z:position.z});
+    } else if (getTcpApproachAxis()) {
       writeBlock(modalCodes, gMotionModal.format(motionCode.multi), getLengthCompCode(),
         xOutput.format(position.x), yOutput.format(position.y), zOutput.format(position.z),
         feed, additionalCodes[0], additionalCodes[1]);

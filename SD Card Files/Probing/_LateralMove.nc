@@ -111,3 +111,17 @@ o2611 endif
 (targets.)
 #<_lm_at1>=[[#<_x> * #<_probe_lat_ux>] + [#<_y> * #<_probe_lat_uy>] + [#<_z> * #<_probe_lat_uz>]]
 #<_lm_at2>=#<_y>
+
+(=================== DID IT ARRIVE? ===================)
+(G38.3 stops on contact without alarming, so a blocked move looks exactly)
+(like a completed one unless it is checked. The leg gating above already)
+(stops the second leg running against an obstruction; this reports it and)
+(stops the program.)
+(See _SafeMove.nc for why the stop is an alarm and not an M30.)
+o2640 if [[ABS[#<_lm_at1> - #<_lm_l1>] GT 0.050] OR [ABS[#<_lm_at2> - #<_lm_l2>] GT 0.050]]
+(PRINT, STOPPED - lateral move touched something )
+(PRINT,   lateral 1 wanted %.3f#<_lm_l1>  reached %.3f#<_lm_at1>  )
+(PRINT,   lateral 2 wanted %.3f#<_lm_l2>  reached %.3f#<_lm_at2>  )
+$Alarm/Send=3
+G4 P0.1
+o2640 endif
