@@ -28,7 +28,7 @@ axes:
   x:
     steps_per_mm: 640
     max_rate_mm_per_min: 6500
-    acceleration_mm_per_sec2: 1150
+    acceleration_mm_per_sec2: 950
     max_travel_mm: 484
     soft_limits: true
     homing:
@@ -53,7 +53,7 @@ axes:
   y:
     steps_per_mm: 640
     max_rate_mm_per_min: 6500
-    acceleration_mm_per_sec2: 1150
+    acceleration_mm_per_sec2: 950
     max_travel_mm: 493
     soft_limits: true
     homing:
@@ -78,7 +78,7 @@ axes:
   z:
     steps_per_mm: 640
     max_rate_mm_per_min: 6000
-    acceleration_mm_per_sec2: 1200
+    acceleration_mm_per_sec2: 950
     max_travel_mm: 275
     soft_limits: true
     homing:
@@ -103,7 +103,7 @@ axes:
   b:
     steps_per_mm: 55.555
     max_rate_mm_per_min: 3000
-    acceleration_mm_per_sec2: 1000
+    acceleration_mm_per_sec2: 950
     motor0:
       standard_stepper:
         step_pin: i2so.10
