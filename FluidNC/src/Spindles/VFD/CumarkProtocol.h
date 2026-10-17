@@ -14,6 +14,7 @@ namespace Spindles {
             int16_t speed;
             int16_t _maxSpeed=18000;
             int16_t _minSpeed=0;
+            uint32_t _speed_tolerance_rpm = 200;
 
             // ---------------------------------------------------------------
             // Adaptive feed control (M52 Pn, LinuxCNC-style) -- three tiers.
@@ -167,6 +168,7 @@ namespace Spindles {
             response_parser get_current_speed(ModbusCommand& data) override;
             response_parser get_current_direction(ModbusCommand& data) override;
             response_parser get_status_ok(ModbusCommand& data) override;
+            bool use_speed_feedback() const override { return true; }
 
             void set_adaptive_feed(float goal_fraction) override;
 
@@ -186,6 +188,7 @@ namespace Spindles {
                 handler.item("torque_baseline_pct", _baseline_pct);
                 handler.item("available_torque_rpm", _available_rpm);
                 handler.item("available_torque_pct", _available_pct);
+                handler.item("speed_tolerance_rpm", _speed_tolerance_rpm, 50, 2000);
             }
         };
     }

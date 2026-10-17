@@ -190,6 +190,19 @@ namespace Spindles {
 
                 vfd->_sync_dev_speed = (uint32_t)std::abs((int)act2);
 
+                // Hand the same reading to the speed-sync wait in
+                // VFDSpindle::setState, which BLOCKS on this queue. Setting
+                // _sync_dev_speed alone is not enough -- the wait only
+                // re-reads it after xQueueReceive returns, so with nothing
+                // being sent it times out after 3 s and alarms.
+                //
+                // A temporary, because _sync_dev_speed is volatile and
+                // xQueueSend takes a plain pointer. Timeout 0 so this poll
+                // task never blocks: a full queue just means the waiter
+                // already has newer values than it has consumed.
+                uint32_t sync_speed = (uint32_t)std::abs((int)act2);
+                xQueueSend(VFD::VFDProtocol::vfd_speed_queue, &sync_speed, 0);
+
                 // Diagnostic: if torque reads exactly zero for a long run
                 // while the spindle is turning, drive param 50.03 is most
                 // likely not pointed at P.01.22, so 0x0005 is never being
@@ -538,7 +551,7 @@ namespace Spindles {
                 vfd->shelfSpeeds(minRPM, maxRPM);
             }
             vfd->setupSpeeds(_maxSpeed);
-            vfd->_slop = 200;
+            vfd->_slop = _speed_tolerance_rpm;   // was: vfd->_slop = 200;
         }
 
 
