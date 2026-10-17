@@ -169,7 +169,7 @@ atc_custom:
   slot4_mpos_mm: '-283.800 -489 -172.8'
   slot5_mpos_mm: '-380.000 -489 -172.9'
   slot6_mpos_mm: '-477.200 -489 -172.3'
-  spindle_stop_time: 2.5
+  spindle_stop_time: 8
   coolant_on_time: 2.5
 uart1:
   txd_pin: gpio.15
