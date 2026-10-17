@@ -89,7 +89,7 @@ namespace Kinematics {
         // Follow the .cpp, not the .h.
         bool transform_cartesian_to_motors(float* motors, float* cartesian) override;
 
-        bool invalid_line(float* cartesian) override;
+        bool invalid_line(float* cartesian, plan_line_data_t* pl_data) override;
         bool invalid_arc(float*            target,
                          plan_line_data_t* pl_data,
                          float*            position,

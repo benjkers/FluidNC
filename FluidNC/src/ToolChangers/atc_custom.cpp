@@ -46,6 +46,10 @@
   directly from machine coordinates, independent of G43.1/TLO modal state.
 */
 
+// Defined at the bottom of this file, outside the namespace, alongside the
+// $ATC/SaveGauge handler. Declared up here so init() can register it.
+Error atc_set_spindle_tool_command(const char* value, AuthenticationLevel auth_level, Channel& out);
+
 namespace ATCs {
 
     // Registry so the $ATC/SaveGauge bridge command (see below) can find the
@@ -57,7 +61,7 @@ namespace ATCs {
         return it == s_atc_instances.end() ? nullptr : it->second;
     }
 
-    void Custom_ATC::run_macro_restoring(bool tcp_was_on, bool spindle_was_on, bool was_inch_mode) {
+       bool Custom_ATC::run_macro_restoring(Channel* channel, bool tcp_was_on, bool spindle_was_on, bool was_inch_mode) {
         if (spindle_was_on) {
             _macro.addf("M5"); //always leave spindle off after tool change, can be returned on with gcode or post
         } else {
@@ -71,10 +75,26 @@ namespace ATCs {
         } else {
             _macro.addf("M129");
         }
-                _macro.run(nullptr);
+            return _macro.run(channel, true);
     }
 
     void Custom_ATC::init() {
+        // Register the $ATC/SetSpindleTool bridge command here rather than in
+        // ProcessSettings.cpp's make_user_commands(), so this ATC stays
+        // self-contained. Command's constructor inserts itself into
+        // Command::List, so simply constructing one registers it -- that is
+        // all make_user_commands() does. init() runs during config load, long
+        // before any M6 could issue the command, which also avoids the
+        // static-initialisation-order question a file-scope static would
+        // raise. The guard stops a second atc_custom registering a duplicate.
+        static bool s_spindle_tool_cmd_registered = false;
+        if (!s_spindle_tool_cmd_registered) {
+            s_spindle_tool_cmd_registered = true;
+            // anyState: issued from inside a running macro, so the machine is
+            // in Cycle rather than Idle.
+            new UserCommand(NULL, "ATC/SetSpindleTool", atc_set_spindle_tool_command, anyState);
+        }
+
         s_atc_instances[name()] = this;
         load_gauge_table();
 
@@ -207,7 +227,7 @@ namespace ATCs {
     // ------------------------------------------------------------------
     // M101 Tn [Qvalue]
     // ------------------------------------------------------------------
-    bool Custom_ATC::master_gauge_tool(tool_t tool_number, bool has_manual_value, float manual_value) {
+        bool Custom_ATC::master_gauge_tool(tool_t tool_number, Channel* channel, bool has_manual_value, float manual_value) {
         bool was_inch_mode = (gc_state.modal.units == Units::Inches);
         const bool tcp_was_on = Kinematics::tcp_is_active();
 
@@ -283,8 +303,7 @@ namespace ATCs {
             request_save_gauge(tool_number);
             move_to_safe_z();
 
-            run_macro_restoring(tcp_was_on, false, was_inch_mode);
-            return true;
+            return run_macro_restoring(channel, tcp_was_on, false, was_inch_mode);
         } catch (...) {
             log_info("Exception caught");
             return false;
@@ -294,12 +313,12 @@ namespace ATCs {
     // ------------------------------------------------------------------
     // Tool change
     // ------------------------------------------------------------------
-    bool Custom_ATC::tool_change(tool_t new_tool, bool pre_select, bool set_tool, bool master_gauge, bool has_manual_gauge,
-                                  float manual_gauge_value) {
+       bool Custom_ATC::tool_change(tool_t new_tool, bool pre_select, bool set_tool, Channel* channel, bool master_gauge,
+                                 bool has_manual_gauge, float manual_gauge_value) {
         // M101 Tn [Qvalue] - re-gauge (or manually set) a tool's gauge
         // length. Entirely separate from selecting/loading a tool.
         if (master_gauge) {
-            return master_gauge_tool(new_tool, has_manual_gauge, manual_gauge_value);
+            return master_gauge_tool(new_tool, channel, has_manual_gauge, manual_gauge_value);
         }
 
         bool spindle_was_on = false;  // used to restore the spindle state
@@ -362,8 +381,7 @@ namespace ATCs {
             }
 
             save_gauge_table();     // persist _prev_tool for power-loss recovery
-            run_macro_restoring(tcp_was_on, spindle_was_on, was_inch_mode);
-            return true;
+            return run_macro_restoring(channel, tcp_was_on, spindle_was_on, was_inch_mode);
         }
 
         // M6T0 is used to reset this ATC and allows the probe to be used to determine the z offset
@@ -372,13 +390,13 @@ namespace ATCs {
                 move_to_safe_z();
                 drop_tool(slot_index(_prev_tool));
             }
-            _prev_tool = new_tool;
+            // Covers a manual tool too, which has no drop_tool() to do it.
+            emit_set_spindle_tool(0);
             move_to_safe_z();
             move_over_toolsetter();
             reset();
             save_gauge_table();
-            run_macro_restoring(tcp_was_on, spindle_was_on, was_inch_mode);
-            return true;
+            return run_macro_restoring(channel, tcp_was_on, spindle_was_on, was_inch_mode);
         }
 
         // Repeat request for the same tool that's already loaded: no physical
@@ -418,8 +436,7 @@ namespace ATCs {
                 }
             }
             _macro.addf("o160 endif");
-            run_macro_restoring(tcp_was_on, spindle_was_on, was_inch_mode);
-            return true;
+            return run_macro_restoring(channel, tcp_was_on, spindle_was_on, was_inch_mode);
         }
 
         was_inch_mode = (gc_state.modal.units == Units::Inches);
@@ -450,6 +467,7 @@ namespace ATCs {
                     _macro.addf("G4P0.1");
                     _macro.addf("(MSG: Remove tool #%d then resume to continue)", _prev_tool);
                     _macro.addf("M0");
+                    emit_set_spindle_tool(0);
                 }
                 move_to_safe_z();
                 move_over_toolsetter();
@@ -459,16 +477,15 @@ namespace ATCs {
                 _macro.addf("(MSG: Install T%d - known gauge length %0.4f - then resume, it will be measured automatically)",
                              GAUGE_SETTER_TOOL, _gauge_setter_length);
                 _macro.addf("M0");
+                emit_set_spindle_tool(GAUGE_SETTER_TOOL);
                 move_to_safe_z();
                 move_over_toolsetter();
                 probe_toolsetter(_gauge_setter_length, false);  // T100's own known gauge length makes a precise approach estimate
                 _macro.addf("#<_atc_measured_z>=[#5063]");
                 request_save_gauge(GAUGE_SETTER_TOOL);
                 move_to_safe_z();
-                _prev_tool = new_tool;
                 save_gauge_table();
-                run_macro_restoring(tcp_was_on, spindle_was_on, was_inch_mode);
-                return true;
+                return run_macro_restoring(channel, tcp_was_on, spindle_was_on, was_inch_mode);
             }
 
             // Every tool (including T1) carries its own absolute-gauge-length
@@ -504,15 +521,18 @@ namespace ATCs {
                     return false;
                 } else {
                     _macro.addf("G4P0.1");
+                    // One M0 covers removing the old tool and fitting the
+                    // probe, so the spindle is unknown from here until the
+                    // operator resumes. Call it empty for that window.
+                    emit_set_spindle_tool(0);
                     _macro.addf("(MSG: Install probe #%d)", PROBE_TOOL);
                     _macro.addf("M0");
+                    emit_set_spindle_tool(PROBE_TOOL);
                     apply_tlo_from_gauge(_probe_gauge_length);  // TLO = absolute gauge length
                     expose_current_tool_gauge(_probe_gauge_length);
-                    _prev_tool = new_tool;
                     move_to_safe_z();
                     save_gauge_table();
-                    run_macro_restoring(tcp_was_on, false, was_inch_mode);
-                    return true;
+                    return run_macro_restoring(channel, tcp_was_on, false, was_inch_mode);
                 }
                 
             }
@@ -532,6 +552,7 @@ namespace ATCs {
                     _macro.addf("G4P0.1");
                     _macro.addf("(MSG: Remove tool #%d then resume to continue)", _prev_tool);
                     _macro.addf("M0");
+                    emit_set_spindle_tool(0);
                 }
 
                 move_to_safe_z();
@@ -560,11 +581,9 @@ namespace ATCs {
                     request_save_gauge(new_tool);
                 }
 
-                _prev_tool = new_tool;
                 move_to_safe_z();
                 save_gauge_table();
-                run_macro_restoring(tcp_was_on, spindle_was_on, was_inch_mode);
-                return true;
+                return run_macro_restoring(channel, tcp_was_on, spindle_was_on, was_inch_mode);
             }
 
             // ---------------------------------------------------------------
@@ -580,8 +599,11 @@ namespace ATCs {
                 move_over_toolsetter();
             }
             _macro.addf("G4P0.1");
+            // Same swap-across-one-M0 case as the probe above.
+            emit_set_spindle_tool(0);
             _macro.addf("(MSG: Install tool #%d then resume to continue)", new_tool);
             _macro.addf("M0");
+            emit_set_spindle_tool(new_tool);
 
             move_to_safe_z();
             move_over_toolsetter();
@@ -591,13 +613,11 @@ namespace ATCs {
             _macro.addf("#<_current_tool_gauge>=[#5063 + %0.4f]", _gauge_setter_length - _ets_reference_probe_z);
             _macro.addf("#<_current_tool_probe_z>=[#5063]");
 
-            _prev_tool = new_tool;
             move_to_safe_z();
             save_gauge_table();
-            run_macro_restoring(tcp_was_on, spindle_was_on, was_inch_mode);
-            return true;
+            return run_macro_restoring(channel, tcp_was_on, spindle_was_on, was_inch_mode);
         } catch (...) { log_info("Exception caught"); }
-
+        
         return false;
     }
 
@@ -627,6 +647,28 @@ namespace ATCs {
 
     void Custom_ATC::request_save_gauge(tool_t tool_number) { _macro.addf("$ATC/SaveGauge=%s,%d", name(), int(tool_number)); }
 
+    // Queues the bridge call that records what the spindle PHYSICALLY holds.
+    // Emitted into the macro rather than assigned here, because this runs
+    // while the macro is being BUILT -- long before the machine moves.
+    void Custom_ATC::emit_set_spindle_tool(tool_t tool_number) {
+        _macro.addf("$ATC/SetSpindleTool=%s,%d", name(), int(tool_number));
+    }
+
+    // Called by the bridge command, from inside the running macro.
+    bool Custom_ATC::set_spindle_tool(tool_t tool_number) {
+        if (_prev_tool == tool_number) {
+            return true;  // nothing changed; don't churn the SD card
+        }
+        _prev_tool = tool_number;
+        save_gauge_table();  // persist now: the next event may be the crash
+        if (tool_number == 0) {
+            log_info("ATC:" << name() << " spindle is now empty");
+        } else {
+            log_info("ATC:" << name() << " spindle now holds T" << int(tool_number));
+        }
+        return true;
+    }
+
     void Custom_ATC::drop_tool(uint8_t slot) {
         tool_t tool_number = tool_t(_first_tool_number + slot);
         move_to_safe_z();
@@ -643,6 +685,8 @@ namespace ATCs {
         _macro.addf("G53G0Z%0.3f", feed_height);                            // lift off tool holder
         _macro.addf("M63 P0");                                              // air off
         move_to_safe_z();
+        // Released and the spindle lifted clear. First moment this is true.
+        emit_set_spindle_tool(0);
     }
 
     void Custom_ATC::pick_tool(uint8_t slot) {
@@ -663,6 +707,8 @@ namespace ATCs {
         _macro.addf("G4 P1");                                   // wait for air to lock
         _macro.addf("G53G0Y%0.3f", feed_point);                 // move tool into rack
         move_to_safe_z();
+        // Clamped and clear of the rack: the spindle really holds it now.
+        emit_set_spindle_tool(tool_number);
     }
 
     // Unified toolsetter probe. Three staged descents:
@@ -812,4 +858,39 @@ Error atc_save_gauge_command(const char* value, AuthenticationLevel auth_level, 
         return Error::InvalidValue;
     }
     return atc->commit_measured_gauge(tool_t(tool)) ? Error::Ok : Error::InvalidValue;
+}
+
+// ------------------------------------------------------------------
+// $ATC/SetSpindleTool=<atc_name>,<tool_number>  bridge command.
+//
+// Same reason for existing as $ATC/SaveGauge above: tool_change() BUILDS a
+// macro and returns, so anything it assigns is committed before the machine
+// has moved. A change that faults half way would leave a persisted tool
+// number that does not match the spindle -- the operator resumes against the
+// wrong TLO, or the next change drops a tool into an occupied pocket.
+//
+// So the macro reports possession as it happens: 0 when a tool is released
+// into the rack (or the operator confirms removing it), the tool number once
+// the next one is clamped. Registered in ProcessSettings.cpp.
+// ------------------------------------------------------------------
+Error atc_set_spindle_tool_command(const char* value, AuthenticationLevel auth_level, Channel& out) {
+    if (!value) {
+        return Error::InvalidValue;
+    }
+    std::string s(value);
+    auto        comma = s.find(',');
+    if (comma == std::string::npos) {
+        return Error::InvalidValue;
+    }
+    std::string name = s.substr(0, comma);
+    int         tool = atoi(s.substr(comma + 1).c_str());
+    if (tool < 0) {
+        return Error::InvalidValue;
+    }
+    auto* atc = ATCs::Custom_ATC::find(name);
+    if (!atc) {
+        log_error("ATC '" << name.c_str() << "' not found for $ATC/SetSpindleTool");
+        return Error::InvalidValue;
+    }
+    return atc->set_spindle_tool(tool_t(tool)) ? Error::Ok : Error::InvalidValue;
 }

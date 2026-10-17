@@ -82,6 +82,12 @@ namespace ATCs {
         // reference"; otherwise it must be one of this instance's rack
         // tools. Returns true on success.
         bool commit_measured_gauge(tool_t tool_number);
+                // $ATC/SetSpindleTool bridge. Records what the spindle PHYSICALLY
+        // holds, called from inside the running macro at the moment the swap
+        // happens -- 0 once a tool is released, the tool number once the next
+        // is clamped. A change that faults part way then leaves a persisted
+        // number that still matches the machine.
+        bool set_spindle_tool(tool_t tool_number);
 
         // Look up a live instance by config name, used by the $ATC/SaveGauge
         // command handler so it works with multiple atc_custom instances.
@@ -229,18 +235,19 @@ namespace ATCs {
         void apply_tlo_from_gauge(float gauge_length);  // emits G43.1Z<...> using a known absolute gauge length
         void expose_current_tool_gauge(float gauge_length);
         void request_save_gauge(tool_t tool_number);  // emits the $ATC/SaveGauge=... bridge call
+        void emit_set_spindle_tool(tool_t tool_number);  // emits the $ATC/SetSpindleTool=... bridge call
 
             // Emits the modal restores this ATC is responsible for putting back,
         // then runs the macro. Every successful exit from tool_change() and
         // master_gauge_tool() goes through here.
-        void run_macro_restoring(bool tcp_was_on, bool spindle_was_on = false, bool was_inch_mode = false);
+        bool run_macro_restoring(Channel* channel, bool tcp_was_on, bool spindle_was_on = false, bool was_inch_mode = false);
 
         // M101 Tn [Qvalue]. If has_manual_value, directly stores
         // manual_value as tool_number's gauge length (the only way to set
         // T1's, since it can't be auto-probed). Otherwise re-probes
         // tool_number on the toolsetter, but only if it's a rack tool AND
         // it's the one currently in the spindle.
-        bool master_gauge_tool(tool_t tool_number, bool has_manual_value, float manual_value);
+        bool master_gauge_tool(tool_t tool_number, Channel* channel, bool has_manual_value, float manual_value);
 
         std::string gauge_file_path();
         void        load_gauge_table();
@@ -251,8 +258,8 @@ namespace ATCs {
     public:
         void init() override;
         void probe_notification() override;
-        bool tool_change(tool_t value, bool pre_select, bool set_tool, bool master_gauge = false, bool has_manual_gauge = false,
-                          float manual_gauge_value = 0.0f) override;
+        bool tool_change(tool_t value, bool pre_select, bool set_tool, Channel* channel, bool master_gauge = false,
+                         bool has_manual_gauge = false, float manual_gauge_value = 0.0f) override;
         void validate() override {}
 
         void group(Configuration::HandlerBase& handler) override {

@@ -337,9 +337,9 @@ namespace Kinematics {
         return false;
     }
 
-    bool TCPCartesian::invalid_line(float* cartesian) {
+        bool TCPCartesian::invalid_line(float* cartesian, plan_line_data_t* pl_data) {
         if (!transformEnabled()) {
-            return Cartesian::invalid_line(cartesian);
+            return Cartesian::invalid_line(cartesian, pl_data);
         }
         // Check the ENDPOINT in motor space. The swept path is checked again
         // per segment inside cartesian_to_motors(), because a move that

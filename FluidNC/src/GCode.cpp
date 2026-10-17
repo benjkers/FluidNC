@@ -1841,7 +1841,7 @@ Error gc_execute_line(const char* input_line, Channel& channel) {
 
     if (gc_block.modal.master_gauge == MasterGauge::Enable) {  // M101 Tn [Qvalue]
         protocol_buffer_synchronize();  // wait for motion in buffer to finish
-        spindle->tool_change(gc_state.selected_tool, false, false, true, masterGaugeHasQ, gc_block.values.q);
+        spindle->tool_change(gc_state.selected_tool, false, false, &channel, true, masterGaugeHasQ, gc_block.values.q);
         report_ovr_counter = 0;  // Set to report change immediately
         gc_ovr_changed();
     }

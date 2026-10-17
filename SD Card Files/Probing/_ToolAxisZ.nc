@@ -37,6 +37,24 @@ o2503 endif
 (constant offset between the written frame and the machine frame is not)
 (known here and does not need to be: the caller's target comes from the same)
 (projection, so it cancels.)
+(=================== SETTLE BEFORE READING POSITION ===================)
+(#<_x>/#<_y>/#<_z> are evaluated through get_mpos with NO buffer sync, so)
+(a read taken while a previous move is still decelerating returns an)
+(IN-FLIGHT position, not the end of the queued motion.)
+()
+(That is harmless for a plain G90 move, whose endpoint comes from the word)
+(itself. It is NOT harmless here: the delta below is computed FROM this)
+(read, so a stale read moves the machine wrong by however far the previous)
+(move still had to run.)
+()
+(It only bites when this macro is entered straight after an UNPROTECTED)
+(rapid. After a G38.x there is no race at all, because mc_probe_cycle ends)
+(in a wait for State::Idle. A plain G0 has no such wait -- which is why one)
+(5 mm descent entered after a bare G0 overshot by 0.803 mm while every)
+(other call in the same program, each following a probe move, was exact.)
+()
+(G4 synchronises the planner before it dwells, so this is the drain.)
+G4 P0.01
 #<_ta_now>=[[#<_x> * #<_probe_axis_ux>] + [#<_y> * #<_probe_axis_uy>] + [#<_z> * #<_probe_axis_uz>]]
 #<_ta_d>=[#<_ta_target> - #<_ta_now>]
 

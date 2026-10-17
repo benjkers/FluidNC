@@ -171,7 +171,7 @@ properties = {
     description: "Feed rate for positioning moves while a probe is in the spindle. Every such move is a PROTECTED move (G38.3), which stops on contact rather than snapping the stylus, so a probing section has no true rapid and this replaces one. Each move is checked afterwards and the program alarms if it did not arrive.",
     group      : "preferences",
     type       : "number",
-    value      : 6000,
+    value      : 3000,
     scope      : "post"
   },
   probeDumpCycleProps: {
@@ -866,7 +866,7 @@ function writeProbeParams(extra) {
   // Positioning feed. Every move made with the probe in the spindle is a
   // PROTECTED move -- G38.3, which stops on contact -- so a probing section
   // has no true rapid, and this is what replaces one.
-  writeBlock("#<_probe_feed_rapid>=" + feedFormat.format(getProperty("probeRapidFeed", 6000)));
+  writeBlock("#<_probe_feed_rapid>=" + feedFormat.format(getProperty("probeRapidFeed", 3000)));
   // Nominal stylus radius from the tool library. ProbeInit.nc uses this
   // only as the FALLBACK for #<_probe_yaw> -- the calibrated effective
   // X/Y probe radius -- so probing still works before yaw is calibrated.
@@ -1099,11 +1099,36 @@ function probedSurfaceZ(z) {
 // modal trackers never saw it, so the next block must write every word
 // instead of suppressing one it wrongly believes is unchanged.
 function safeMove(x, y, z) {
+  // Write the feed here, every time, rather than relying on whatever
+  // writeProbeParams left behind -- this can be reached before onCyclePoint
+  // has run, so #<_probe_feed_rapid> cannot be assumed to be set.
+  writeBlock("#<_probe_feed_rapid>=" + feedFormat.format(getProperty("probeRapidFeed", 3000)));
   writeBlock("#<_sm_x>=" + xyzFormat.format(x));
   writeBlock("#<_sm_y>=" + xyzFormat.format(y));
   writeBlock("#<_sm_z>=" + xyzFormat.format(z));
   writeBlock("$SD/Run=" + PROBING_DIR + "_SafeMove.nc");
-  forceXYZ();
+  // The macro moved the machine, so the modal trackers did not see it -- but
+  // this move's destination is known exactly, so SYNC them to it instead of
+  // resetting them.
+  //
+  // forceXYZ() here was wrong. It makes the next XYZ output unconditional,
+  // which defeated the suppression that should have removed the toolpath's
+  // own first rapid -- normally to this very point, since
+  // getInitialPosition() is where we just moved to. The result was a
+  // redundant "G0 X.. Y.. Z.." to the position the machine already held,
+  // immediately after every safeMove.
+  //
+  // Harmless as a G0. Not harmless if rapids in a probing section are ever
+  // protected: a G38.x whose target is the current position is rejected with
+  // error 33, because GCode.cpp compares with isequal_position_vector, a bare
+  // memcmp against gc_state.position.
+  //
+  // _ToolAxisZ.nc and _LateralMove.nc keep forceXYZ, correctly: at an index
+  // angle those change all three written axes by amounts the post does not
+  // compute, so it genuinely does not know the resulting coordinates.
+  xOutput.format(x);
+  yOutput.format(y);
+  zOutput.format(z);
 }
 
 function protectedMove(words) {
@@ -3557,6 +3582,43 @@ function writeInitialPositioning(position, isRequired, codes1, codes2) {
 // >>>>> INCLUDED FROM include_files/onRapid_fanuc.cpi
 function onRapid(_x, _y, _z) {
   updateAdaptiveFeedForMovement();
+  // In a PROBING section there is no true rapid: every positioning move is
+  // protected and confirmed. writeInitialPositioning says the same thing but
+  // only ever gets the chance on the FIRST section after a tool change --
+  // writeStartBlocks returns early when isRequired is false and
+  // safeStartAllOperations is off, which is every continuation section. Those
+  // sections' approaches, the lifts between cycles and the retract at the end
+  // all arrive here instead, and went out as bare G0s with a stylus fitted.
+  //
+  // This was tried once before and backed out, because it produced
+  // zero-length G38.3 blocks and GCode.cpp rejects those outright with error
+  // 33 -- isequal_position_vector is a bare memcmp against gc_state.position.
+  // The cause was NOT here: safeMove() ended in forceXYZ(), which reset the
+  // modal trackers and so forced the toolpath's own first rapid to be
+  // re-emitted in full, to the very point writeInitialPositioning had just
+  // moved to. That redundant G0 was the zero-length move. safeMove() now
+  // syncs the trackers instead, so the duplicate is suppressed at source, and
+  // _SafeMove.nc also skips on distance as a second line of defence.
+  //
+  // Milling sections are untouched: their rapids stay G0.
+  if (isProbeOperation()) {
+    // Consult the modal trackers first. safeMove() keeps them in sync with
+    // where it actually moved, so if all three already hold this move's
+    // values there is nothing to do -- which is exactly the toolpath's first
+    // rapid, to the point writeInitialPositioning has just reached. Skipping
+    // it here keeps a pointless macro call out of the program, and keeps a
+    // zero-length G38.3 out of the macro.
+    //
+    // format() updates the tracker as well as reporting the change, so the
+    // call inside safeMove() below is then a no-op. That is intended.
+    var px = xOutput.format(_x);
+    var py = yOutput.format(_y);
+    var pz = zOutput.format(_z);
+    if (px || py || pz) {
+      safeMove(_x, _y, _z);
+    }
+    return;
+  }
   var x = xOutput.format(_x);
   var y = yOutput.format(_y);
   var z = zOutput.format(_z);
