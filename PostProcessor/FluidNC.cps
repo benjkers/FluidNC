@@ -150,6 +150,30 @@ properties = {
     value      : true,
     scope      : "post"
   },
+  pauseBeforeToolChange: {
+    title      : "Pause before each tool change",
+    description: "'Yes' holds the program with M0 immediately before every tool change, after the Z retract and with coolant already off, so the machine is parked clear when it stops. Resume runs the change. For watching the ATC through a cycle, or stepping a new program tool by tool. Leave off for production -- it stops on EVERY change, including the first.",
+    group      : "preferences",
+    type       : "boolean",
+    value      : false,
+    scope      : "post"
+  },
+  splitIndexedApproach: {
+    title      : "Split indexed milling approach",
+    description: "'Yes' enters an indexed (B not at 0) milling section as a flat traverse at the retract height followed by a plumb plunge, instead of one diagonal rapid. Requires /Motion/_Approach.nc and /Motion/_ApMove.nc on the SD card. The split is computed by the macro because the height that matters is machine Z, which depends on the pivot and the work offset and so is known only to the controller. 'No' restores the single diagonal move -- keep that available for comparing against a known-good program.",
+    group      : "preferences",
+    type       : "boolean",
+    value      : true,
+    scope      : "post"
+  },
+  splitProbeApproach: {
+    title      : "Split probe approach",
+    description: "'Yes' splits every probing positioning move the same way, through the same macro, with each leg still going through _SafeMove.nc so it stops on contact and confirms it arrived. A move that is already a single clean axis move -- the lifts and descents between cycles -- stays one move, so only real diagonals change. 'No' reverts to one protected diagonal per move.",
+    group      : "preferences",
+    type       : "boolean",
+    value      : true,
+    scope      : "post"
+  },
   probeLogToSD: {
     title      : "Log probe results to SD card",
     description: "'Yes' appends every probing result to /probe_log.csv on the controller's SD card, for trending or record keeping. Independent of Print Results. Clear the file with $Probe/LogClear, view it with $Probe/LogShow.",
@@ -172,14 +196,6 @@ properties = {
     group      : "preferences",
     type       : "number",
     value      : 3000,
-    scope      : "post"
-  },
-  probeDumpCycleProps: {
-    title      : "Probe: dump cycle properties",
-    description: "Diagnostic only. Writes every property Fusion exposes on a probing cycle into the output as comments, so the real property names and values can be read off. Leave off for normal use.",
-    group      : "preferences",
-    type       : "boolean",
-    value      : false,
     scope      : "post"
   }
 };
@@ -800,6 +816,12 @@ function onParameter(name, value) {
 // Every probing macro lives in this folder on the SD card.
 var PROBING_DIR = "/Probing/";
 
+// Positioning macros live separately. _Approach.nc and _ApMove.nc are NOT
+// probing macros -- the milling path uses them too -- so they do not belong
+// in /Probing/ with the cycles. _SafeMove.nc stays there: the probing macros
+// call it by that path, so moving it would mean editing all of them.
+var MOTION_DIR = "/Motion/";
+
 // The cycle point of the probe currently being written, set by onCyclePoint.
 var probePoint = undefined;
 
@@ -807,33 +829,6 @@ function runProbeMacro(name) {
   writeBlock("$SD/Run=" + PROBING_DIR + name);
 }
 
-// Diagnostic: dump every property Fusion exposes on the probing cycle,
-// as comments. Turn on the "Probe: dump cycle properties" post property,
-// post one operation, and the output lists the real property names and
-// values -- which beats guessing at them one at a time.
-function dumpCycleProperties() {
-  if (!getProperty("probeDumpCycleProps")) {
-    return;
-  }
-  writeComment("---- cycle properties ----");
-  for (var k in cycle) {
-    try {
-      writeComment("cycle." + k + " = " + cycle[k]);
-    } catch (e) {
-      writeComment("cycle." + k + " = <unreadable>");
-    }
-  }
-  writeComment("---- section probe properties ----");
-  var names = ["probeWorkOffset", "strategy", "hasParameter"];
-  for (var i = 0; i < names.length; ++i) {
-    try {
-      writeComment("currentSection." + names[i] + " = " + currentSection[names[i]]);
-    } catch (e2) {
-      writeComment("currentSection." + names[i] + " = <unreadable>");
-    }
-  }
-  writeComment("---- end ----");
-}
 
 // Fusion's out-of-position / wrong-size actions. Confirmed by dumping the
 // cycle properties: the property only EXISTS when the corresponding box is
@@ -853,7 +848,6 @@ function isStopAction(action) {
 // gcode error in FluidNC and aborts the controller, so no macro should
 // ever have to guess whether a value was set.
 function writeProbeParams(extra) {
-  dumpCycleProperties();
   var slowFeed = probeFeedSlow ? probeFeedSlow : cycle.feedrate / 4;
   writeBlock("#<_probe_clearance>=" + xyzFormat.format(cycle.probeClearance || 0));
   writeBlock("#<_probe_overtravel>=" + xyzFormat.format(cycle.probeOvertravel || 0));
@@ -1098,6 +1092,53 @@ function probedSurfaceZ(z) {
 // forceXYZ() afterwards because the move happened inside a macro: the post's
 // modal trackers never saw it, so the next block must write every word
 // instead of suppressing one it wrongly believes is unchanged.
+// A positioning move made FLAT then PLUMB by /Motion/_Approach.nc instead of
+// as one diagonal. Used for both milling and probing approaches.
+//
+// The split cannot be computed here. The height that matters is machine Z,
+// and the machine Z of a work-frame point depends on the pivot and the work
+// offset, neither of which the post knows. getCurrentPosition() is no help
+// either: it tracks the TOOLPATH, so after a G53 retract it still reports
+// where the last cut ended, not the top of travel. The controller knows
+// where it is, so the post sends the target and the tool axis and the macro
+// does the arithmetic.
+function approachMove(x, y, z, isProtected) {
+  // The tool axis in the WORK frame. getTcpApproachAxis() returns nothing
+  // when that is already the written Z -- an un-indexed section, TCP off, a
+  // 3-axis machine -- and (0,0,1) is exactly right in that case, so one code
+  // path covers every angle and the macro needs no special case.
+  var v = getTcpApproachAxis() || new Vector(0, 0, 1);
+  if (isProtected) {
+    // _Approach.nc routes every leg through _SafeMove.nc, which takes its
+    // feed from here. Written every time, for the same reason safeMove()
+    // does it: this can be reached before onCyclePoint has run, so the
+    // parameter cannot be assumed to be set.
+    writeBlock("#<_probe_feed_rapid>=" + feedFormat.format(getProperty("probeRapidFeed", 3000)));
+  }
+  writeBlock("#<_ap_x>=" + xyzFormat.format(x));
+  writeBlock("#<_ap_y>=" + xyzFormat.format(y));
+  writeBlock("#<_ap_z>=" + xyzFormat.format(z));
+  // cosFormat, not xyzFormat. L is a PROJECTION onto v, so millimetre
+  // precision here is not enough: at B37.5 three decimals give |v| = 0.999865,
+  // which both shortens the traverse height and walks the plunge sideways by
+  // about 0.1 mm over a 200 mm drop. Six decimals put both under a micron.
+  writeBlock("#<_ap_vx>=" + cosFormat.format(v.x));
+  writeBlock("#<_ap_vy>=" + cosFormat.format(v.y));
+  writeBlock("#<_ap_vz>=" + cosFormat.format(v.z));
+  // Written every time rather than left to the macro's EXISTS default: named
+  // parameters persist for the whole program, so one left at 1 would be
+  // silently inherited by every later approach.
+  writeBlock("#<_ap_protected>=" + (isProtected ? 1 : 0));
+  writeBlock("$SD/Run=" + MOTION_DIR + "_Approach.nc");
+  // Sync the trackers WITHOUT emitting, exactly as safeMove() does: the
+  // machine is at this point now, so the toolpath's own first rapid to it is
+  // suppressed instead of re-emitted. forceXYZ() here is what previously
+  // turned that duplicate into a zero-length move -- error 33 inside a G38.
+  xOutput.format(x);
+  yOutput.format(y);
+  zOutput.format(z);
+}
+
 function safeMove(x, y, z) {
   // Write the feed here, every time, rather than relying on whatever
   // writeProbeParams left behind -- this can be reached before onCyclePoint
@@ -2883,8 +2924,27 @@ function defineMachine() {
     // Putting the measured tilt here as well would apply it twice. Fusion
     // only needs this for reach and limit checking.
     //
-    // The rotary does not home, so its range is unlimited.
-    var bAxis = createAxis({coordinate:1, table:true, axis:[0, 1, 0], cyclic:true, preference:0, tcp:useTCP});
+    // RANGE MATTERS, even though the rotary does not home.
+    //
+    // cyclic:true on its own is not enough: with no range the kernel has no
+    // window to normalise into, so getABCByPreference returns whatever the
+    // workplane maths gives. That produced B270, B-270 and B-360 in the same
+    // program, for orientations also reachable as B-90 and B0.
+    //
+    // Those are not merely untidy, they are unsafe under TCP.
+    // cartesian_to_motors() segments an indexing move and runs outOfTravel()
+    // on EVERY segment, because the commanded point swings about the pivot as
+    // B turns. A 90 degree index traces a short arc that stays inside the
+    // envelope; a 270 or 360 degree one carries the point most of the way
+    // around the pivot and straight out of travel. The soft-limit error that
+    // appears at B360 and not at B0 is that check working correctly -- the
+    // endpoints are identical, the swept path is not.
+    //
+    // -180..180 rather than 0..360 puts the wrap seam at +/-180, away from
+    // the B0 and B90 this machine actually works at. With 0..360 the seam
+    // sits exactly on B0, which is how the same orientation came out as both
+    // 0 and 360 in one program.
+    var bAxis = createAxis({coordinate:1, table:true, axis:[0, 1, 0], range:[-180, 180], cyclic:true, preference:0, tcp:useTCP});
     machineConfiguration = new MachineConfiguration(bAxis);
 
     setMachineConfiguration(machineConfiguration);
@@ -3217,6 +3277,22 @@ function writeToolCall(tool, insertToolCall) {
       if (!isFirstSection() && getProperty("optionalStop") && insertToolCall) {
         onCommand(COMMAND_OPTIONAL_STOP);
       }
+      // Optional hold before the change itself. This sits AFTER the retract
+      // and the coolant-off above, so the machine is parked at the top of
+      // travel and dry when it stops -- the state you want to be looking at.
+      //
+      // Deliberately an M0 and not the M1 above it: the optional stop is
+      // skipped whenever the operator has optional-stop switched off at the
+      // controller, which is exactly when someone stepping through an ATC
+      // cycle would be most surprised to sail past it.
+      //
+      // onCommand(COMMAND_STOP) also sets forceSpindleSpeed and forceCoolant,
+      // which matters here -- after a hold the operator may have changed
+      // either, so both are re-output rather than assumed modal.
+      if (getProperty("pauseBeforeToolChange")) {
+        writeComment("--- PAUSED BEFORE TOOL CHANGE, RESUME TO RUN IT ---");
+        onCommand(COMMAND_STOP);
+      }
       onCommand(COMMAND_LOAD_TOOL);
     }
   });
@@ -3518,12 +3594,45 @@ function writeInitialPositioning(position, isRequired, codes1, codes2) {
       if (pre) {
         writeBlock(pre);
       }
-      safeMove(position.x, position.y, position.z);
+      // A single protected move is still a DIAGONAL -- it stops on contact
+      // rather than crashing, but it sweeps the same path. Split it.
+      if (getProperty("splitProbeApproach")) {
+        approachMove(position.x, position.y, position.z, true);
+      } else {
+        safeMove(position.x, position.y, position.z);
+      }
       machineSimulation({x:position.x, y:position.y, z:position.z});
     } else if (getTcpApproachAxis()) {
-      writeBlock(modalCodes, gMotionModal.format(motionCode.multi), getLengthCompCode(),
-        xOutput.format(position.x), yOutput.format(position.y), zOutput.format(position.z),
-        feed, additionalCodes[0], additionalCodes[1]);
+      // THE SINGLE MOVE ARGUED FOR ABOVE IS SUPERSEDED HERE. That reasoning
+      // holds -- the diagonal does stay above the operation's clearance plane
+      // at every angle -- but the clearance plane belongs to the STOCK, so it
+      // bounds nothing about fixtures, clamps or the rotary body, which is
+      // what the diagonal actually sweeps through on the way down.
+      //
+      // THE SIMULATION IS LEFT DECLARING THE DIAGONAL, deliberately: the post
+      // does not know the headroom, so it cannot describe the two legs. That
+      // errs the right way. The real path has the SAME XY footprint as the
+      // diagonal -- same straight line between the same two XY points, just
+      // flown level -- and is never lower, so machine simulation can flag a
+      // collision that will not happen but cannot miss one that will.
+      //
+      // A mapped high feed would turn these rapids into G1 F<n>, which the
+      // macro does not emit. Nothing sets highFeedMapping in this post, so
+      // that is dormant -- but fall back rather than drop the mapping.
+      if (getProperty("splitIndexedApproach") && highFeedMapping == HIGH_FEED_NO_MAPPING) {
+        // The motion is a macro call and $SD/Run= carries no G or M words, so
+        // the modal state, length compensation and anything the caller passed
+        // go out first on a block of their own.
+        var preCodes = formatWords(modalCodes, getLengthCompCode(), additionalCodes[0], additionalCodes[1]);
+        if (preCodes) {
+          writeBlock(preCodes);
+        }
+        approachMove(position.x, position.y, position.z, false);
+      } else {
+        writeBlock(modalCodes, gMotionModal.format(motionCode.multi), getLengthCompCode(),
+          xOutput.format(position.x), yOutput.format(position.y), zOutput.format(position.z),
+          feed, additionalCodes[0], additionalCodes[1]);
+      }
       machineSimulation({x:position.x, y:position.y, z:position.z});
     } else {
       writeBlock(modalCodes, gMotionModal.format(motionCode.multi), xOutput.format(position.x), yOutput.format(position.y), feed, additionalCodes[0]);
@@ -3615,7 +3724,17 @@ function onRapid(_x, _y, _z) {
     var py = yOutput.format(_y);
     var pz = zOutput.format(_z);
     if (px || py || pz) {
-      safeMove(_x, _y, _z);
+      // Most probing approaches arrive HERE, not in writeInitialPositioning
+      // -- see the note above about continuation sections -- so splitting
+      // only the section-entry branch would leave nearly all of them
+      // diagonal. The macro keeps a move that is already a single clean axis
+      // move down to one move, so the lifts and descents between cycles come
+      // out exactly as they do today and only real diagonals are split.
+      if (getProperty("splitProbeApproach")) {
+        approachMove(_x, _y, _z, true);
+      } else {
+        safeMove(_x, _y, _z);
+      }
     }
     return;
   }
