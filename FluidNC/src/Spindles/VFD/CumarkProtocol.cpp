@@ -393,6 +393,13 @@ namespace Spindles {
                     target_f += std::max(-lim, std::min(lim, dest - target_f));
                 }
                 target_f = std::max(float(_goal_min_pct), std::min(float(_goal_max_pct), target_f));
+            } else if (target_f < float(_baseline_override)) {
+                // Tiers 1 and 2 are always armed, so their recovery has to be
+                // too. With no M52 goal there is no tier 3 to walk the target
+                // back up, and the feed would sit at the floor for the rest of
+                // the program. Returns to the operator's DIAL rather than a
+                // hardcoded 100, at the same cautious rate tier 3 adds feed.
+                target_f = std::min(float(_baseline_override), target_f + _goal_slew_up * dt_s);
             }
 
             target_f = std::max(float(effective_floor), target_f);
