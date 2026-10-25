@@ -188,17 +188,18 @@ Cumark:
   off_on_alarm: true
 
   protect_floor_pct: 20
-  protect_ramp_pct_per_sec: 50
+  protect_ramp_pct_per_sec: 250
   pullout_trip_fraction: 0.85
 
+  engage_torque_pct: 0.25
   goal_min_pct: 25
   goal_max_pct: 200
   goal_deadband_pct: 2
   goal_max_rpm: 14000
-  pullout_goal_fraction: 0.7
+  pullout_goal_fraction: 0.8
   load_exponent: 0.75
-  goal_slew_up_pct_per_sec: 15
-  goal_slew_down_pct_per_sec: 50
+  goal_slew_up_pct_per_sec: 50
+  goal_slew_down_pct_per_sec: 150
 
   torque_offset_rpm: 0 3000 6000 9000 12000 15000 18000
   torque_offset_pct: 0 -1.6 -4.5 -3.2 -2.3 -1.9 -1.6

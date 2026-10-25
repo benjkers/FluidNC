@@ -294,6 +294,7 @@ namespace Spindles {
                 dt_s = 0.25f;  // first call, or a comms dropout
             }
 
+
             // LAYER 0. h = feed/(rpm*teeth), so scaling feed by the factor the
             // speed fell by holds h exactly -- rpm_actual cancels. An identity,
             // not a loop. It holds torque too, so tier 3 never sees a droop.
@@ -368,16 +369,25 @@ namespace Spindles {
                              << effective_goal << "% -- unreachable at " << int(_last_rpm) << " rpm");
                 }
 
-                // _last_torque_percent is max(net,0), so it reads zero in air
-                // and a ratio against that slams the override to the ceiling.
+                // Engagement gate: below engage_torque_pct the tool is in air
+                // and the ratio below would rail the override to goal_max.
+                // Absolute, not a fraction of the goal -- as a fraction it
+                // scaled with the goal and blocked a light cut entirely.
+                // 0 lets it ramp in air, and enter the next cut there.
                 const float error = _last_torque_percent - effective_goal;
-                if (_last_torque_percent >= std::max(1.0f, 0.30f * effective_goal) &&
+                if (_last_torque_percent >= _engage_torque_pct &&
                     fabsf(error) > float(_goal_deadband_pct)) {
                     // load ~ override^n, so the override that lands the
                     // measured load on the goal is that ratio raised to 1/n.
                     // chip cancels out of the ratio, so this works unchanged
                     // in chip-free space. No accumulated state, no wind-up.
-                    float dest = target_f * powf(effective_goal / _last_torque_percent, 1.0f / _load_exponent);
+                    // Floor the divisor: _last_torque_percent is max(net,0) and
+                    // is routinely EXACTLY 0.0f in air, so with
+                    // engage_torque_pct = 0 this divides by zero. IEEE gives
+                    // +inf and the clamp below still lands on goal_max, but
+                    // that is relying on inf propagating through powf.
+                    const float meas = std::max(_last_torque_percent, 0.1f);
+                    float dest = target_f * powf(effective_goal / meas, 1.0f / _load_exponent);
                     dest = std::max(float(_goal_min_pct), std::min(float(_goal_max_pct), dest));
                     const float lim = (dest < target_f ? _goal_slew_down : _goal_slew_up) * dt_s;
                     target_f += std::max(-lim, std::min(lim, dest - target_f));

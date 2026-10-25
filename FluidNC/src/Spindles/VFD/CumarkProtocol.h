@@ -44,6 +44,23 @@ namespace Spindles {
             float    _pullout_goal_fraction = 0.70f;
             float    _goal_max_rpm          = 14000.0f;  // above: protection only
 
+            // Below this NET torque, tier 3 holds instead of seeking.
+            //
+            // ABSOLUTE, not a fraction of the goal. As a fraction it scaled
+            // with the goal, so a clamped or low goal put the threshold above
+            // the torque of a light cut and tier 3 never engaged at all.
+            //
+            // FLOAT, because the useful range is below 1%. net = raw - offset
+            // straddles zero in air, so the reading there is noise either side
+            // of 0 clamped at 0, not a clean zero:
+            //   0.0  seek always, including on an exactly-zero reading
+            //   0.5  seek on anything above the zero-flicker  <- "above zero"
+            //   2.0  ignore the noise band; holds in air
+            // Only a value above the noise band actually keeps the override
+            // down in air. Below that it ramps to goal_max and the next cut
+            // starts there.
+            float _engage_torque_pct = 0.5f;
+
             // load ~ override^n. Material dependent -- measure it: straight
             // slot at constant engagement, step the override, slope of
             // log(torque) vs log(override).
@@ -138,6 +155,7 @@ namespace Spindles {
                 handler.item("goal_deadband_pct", _goal_deadband_pct, 0, 50);
                 handler.item("goal_max_rpm", _goal_max_rpm);
                 handler.item("pullout_goal_fraction", _pullout_goal_fraction, 0.1f, 1.0f);
+                handler.item("engage_torque_pct", _engage_torque_pct, 0.0f, 50.0f);
                 handler.item("load_exponent", _load_exponent, 0.3f, 1.2f);
                 handler.item("goal_slew_up_pct_per_sec", _goal_slew_up);
                 handler.item("goal_slew_down_pct_per_sec", _goal_slew_down);
