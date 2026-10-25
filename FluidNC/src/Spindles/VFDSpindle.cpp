@@ -274,7 +274,7 @@ namespace Spindles {
         // @config poll_ms
         // @default 250
         // How often, in milliseconds, to poll the VFD over Modbus for status/speed.
-        handler.item("poll_ms", _poll_ms, 250, 20000);
+        handler.item("poll_ms", _poll_ms, 50, 20000);
 
         // @config retries
         // @default 5

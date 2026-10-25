@@ -11,7 +11,7 @@ stepping:
   disable_delay_us: 0
 kinematics:
   TCPCartesian:
-    pivot_x_mm: -236.856
+    pivot_x_mm: -236.708
     pivot_y_mm: -185.406
     pivot_z_mm: -219.301
     axis_x: 0
@@ -179,24 +179,28 @@ uart1:
   mode: 8N1
 Cumark:
   atc: atc_custom
-  poll_ms: 250
+  poll_ms: 100
   uart_num: 1
   modbus_id: 1
   tool_num: 0
   speed_tolerance_rpm: 200
   speed_map: 0=0.000% 0=3.000% 540=3.000% 18000=100.000%
   off_on_alarm: true
-  adaptive_feed_floor_percent: 20
-  adaptive_feed_min_percent: 25
-  adaptive_feed_max_percent: 150
-  adaptive_feed_gain_down: 2
-  adaptive_feed_gain_up: 0.5
-  adaptive_feed_deadband_percent: 2
-  adaptive_feed_aggressive_step: 50
-  torque_baseline_rpm: 0 3000 6000 9000 12000 15000 18000
-  torque_baseline_pct: 0 -1.6 -4.5 -3.2 -2.3 -1.9 -1.6
-  available_torque_rpm: 0 3000 6000 9000 12000 15000 18000
-  available_torque_pct: 101.6 101.6 74.5 38.2 22.3 11.9 4.6
-  adaptive_max_rpm: 12000
-  goal_safety_fraction: 0.7
-  tier2_fraction: 0.85
+
+  protect_floor_pct: 20
+  protect_ramp_pct_per_sec: 50
+  pullout_trip_fraction: 0.85
+
+  goal_min_pct: 25
+  goal_max_pct: 200
+  goal_deadband_pct: 2
+  goal_max_rpm: 14000
+  pullout_goal_fraction: 0.7
+  load_exponent: 0.75
+  goal_slew_up_pct_per_sec: 15
+  goal_slew_down_pct_per_sec: 50
+
+  torque_offset_rpm: 0 3000 6000 9000 12000 15000 18000
+  torque_offset_pct: 0 -1.6 -4.5 -3.2 -2.3 -1.9 -1.6
+  pullout_torque_rpm: 0 3000 6000 9000 12000 15000 18000
+  pullout_torque_pct: 101.6 101.6 74.5 38.2 22.3 11.9 4.6

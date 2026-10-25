@@ -174,6 +174,14 @@ properties = {
     value      : true,
     scope      : "post"
   },
+  probeDumpCycleProps: {
+    title      : "Dump probe cycle properties (diagnostic)",
+    description: "'Yes' writes every key Fusion supplies on the cycle object, plus the probe point, the frame vectors and the derived heights, as comments above each probing cycle. Also downgrades the missing-lift error to a warning so a degenerate cycle still posts for inspection. Diagnostic only -- leave off for cutting.",
+    group      : "preferences",
+    type       : "boolean",
+    value      : false,
+    scope      : "post"
+  },
   probeLogToSD: {
     title      : "Log probe results to SD card",
     description: "'Yes' appends every probing result to /probe_log.csv on the controller's SD card, for trending or record keeping. Independent of Print Results. Clear the file with $Probe/LogClear, view it with $Probe/LogShow.",
@@ -847,7 +855,42 @@ function isStopAction(action) {
 // them every time is deliberate: reading an UNDEFINED #<param> is a hard
 // gcode error in FluidNC and aborts the controller, so no macro should
 // ever have to guess whether a value was set.
+// Diagnostic: everything Fusion hands over on this cycle, plus what the post
+// derives from it. The frame question cannot be settled from the posted
+// numbers alone -- cycle.retract came out equal to probePoint.z at BOTH B0 and
+// B90, which is either Fusion reporting heights in the rotated output frame or
+// two coincidences. This prints the raw object so it is no longer a guess.
+function dumpCycleProperties() {
+  if (!getProperty("probeDumpCycleProps")) {
+    return;
+  }
+  writeComment("DUMP cycleType=" + cycleType);
+  var keys = [];
+  for (var k in cycle) {
+    keys.push(k);
+  }
+  keys.sort();
+  for (var i = 0; i < keys.length; ++i) {
+    var v = cycle[keys[i]];
+    if (typeof v != "function") {
+      writeComment("DUMP cycle." + keys[i] + " = " + v);
+    }
+  }
+  var f = machineAxesInFrame();
+  writeComment("DUMP probePoint = " + (probePoint ?
+    (probePoint.x + ", " + probePoint.y + ", " + probePoint.z) : "undefined"));
+  writeComment("DUMP toolAxis v = " + f.v.x + ", " + f.v.y + ", " + f.v.z);
+  writeComment("DUMP lateral u = " + f.u.x + ", " + f.u.y + ", " + f.u.z);
+  if (probePoint) {
+    writeComment("DUMP baseHeight = " + toolAxisHeight(probePoint) +
+      "  spanOf = " + machineSpanOf(probePoint));
+  }
+  writeComment("DUMP abc = " + (currentSection.isMultiAxis() ? "multiaxis" :
+    (currentSection.workPlane ? "workPlane set" : "none")));
+}
+
 function writeProbeParams(extra) {
+  dumpCycleProperties();
   var slowFeed = probeFeedSlow ? probeFeedSlow : cycle.feedrate / 4;
   writeBlock("#<_probe_clearance>=" + xyzFormat.format(cycle.probeClearance || 0));
   writeBlock("#<_probe_overtravel>=" + xyzFormat.format(cycle.probeOvertravel || 0));
@@ -892,32 +935,56 @@ function writeProbeParams(extra) {
   writeBlock("#<_probe_lat_ux>=" + cosFormat.format(probeLat.x));
   writeBlock("#<_probe_lat_uy>=" + cosFormat.format(probeLat.y));
   writeBlock("#<_probe_lat_uz>=" + cosFormat.format(probeLat.z));
-  // ABSOLUTE heights, as tool-axis coordinates. Fusion hands them over as
-  // written Z values, which carry no orientation: at B90 a plane of constant
-  // written Z is a VERTICAL plane, so two points on one flat face arrive at
-  // different "heights".
+  // ABSOLUTE heights, as tool-axis coordinates.
   //
-  // Projecting a POINT on to the tool axis fixes that, but only if the point
-  // is a real point. Building (px, py, retract) and (px, py, depth) and
-  // projecting both does NOT work: at B90 the tool axis is written X, the
-  // projection reads x alone, the two points share x, and retract and depth
-  // come out EQUAL -- which is what posted before this, and leaves the
-  // multi-touch macros with no lift between touches.
+  // Fusion's SCALAR heights are useless at an index. cycle.retract, .bottom,
+  // .clearance and .stock are output-frame Z values, and at B90 written Z is
+  // lateral -- the B90 dump has all four reading 48.4836, the probe point's
+  // own Z. Nothing about a height survives in them, and no arithmetic on them
+  // recovers it: differencing against probePoint.z gave retract == depth.
   //
-  // So project the probe point once for the base height, and add each offset
-  // as a DISTANCE. cycle.retract and the depth are both heights in the
-  // cycle's own frame, so differencing them against probePoint.z cancels
-  // that frame's origin and leaves a pure distance along the tool axis,
-  // which is meaningful here. At B0 the base is probePoint.z and both
-  // reduce to the raw Fusion values, so nothing changes on a 3-axis
-  // definition, with TCP disabled, or un-indexed.
-  var pz = probePoint ? probePoint.z : 0;
-  var baseHeight = toolAxisHeight(new Vector(probePoint ? probePoint.x : 0,
-    probePoint ? probePoint.y : 0, pz));
-  var retractGap = (cycle.retract !== undefined ? cycle.retract : 0) - pz;
-  var depthGap = probedSurfaceZ(pz) - pz;
-  writeBlock("#<_probe_retract_z>=" + xyzFormat.format(baseHeight + retractGap));
-  writeBlock("#<_probe_depth_z>=" + xyzFormat.format(baseHeight + depthGap));
+  // The *Position vectors DO carry it. They are real written-frame points, so
+  // projecting them on the tool axis is the height, with no origin to cancel
+  // and no reference point needed. From the B90 dump:
+  //   retractPosition (-12, -202.562, 48.4836) . (-1,0,0) =  12
+  //   bottomPosition  (1.95, -202.562, 48.4836) . (-1,0,0) = -1.95
+  // which are exactly the numbers B0 produces, and the lift is 13.95 =
+  // cycle.depth. At B0 the vectors equal their *Point twins and the
+  // projection is just their Z, so a 3-axis definition, TCP off and B0 are
+  // all unchanged.
+  var retractHeight, depthHeight;
+  if (cycle.retractPosition !== undefined && cycle.bottomPosition !== undefined) {
+    retractHeight = toolAxisHeight(cycle.retractPosition);
+    depthHeight = toolAxisHeight(cycle.bottomPosition);
+  } else {
+    // Older cycle types that supply only the scalars. Correct at B0, and the
+    // guard below catches the degenerate indexed case.
+    var pz = probePoint ? probePoint.z : 0;
+    var base = toolAxisHeight(new Vector(probePoint ? probePoint.x : 0,
+      probePoint ? probePoint.y : 0, pz));
+    retractHeight = base + ((cycle.retract !== undefined ? cycle.retract : 0) - pz);
+    depthHeight = base + (probedSurfaceZ(pz) - pz);
+  }
+  // The external macros traverse laterally AT the retract height, so with no
+  // lift the stylus is dragged through the part. ProbeXWall.nc catches it and
+  // alarms, but by then the program is on the machine.
+  if (extra && extra.lift && !(retractHeight - depthHeight > 1e-3)) {
+    var msg = "Probing operation '" + getParameter("operation-comment", "") +
+      "' produced no lift between touches (retract and depth both " +
+      xyzFormat.format(retractHeight) + "). An external cycle traverses " +
+      "laterally at the retract height, so this would drag the stylus " +
+      "through the part. Post again with 'Dump probe cycle properties' " +
+      "enabled and check whether this cycle supplies retractPosition and " +
+      "bottomPosition.";
+    if (getProperty("probeDumpCycleProps")) {
+      warning(localize(msg));
+    } else {
+      error(localize(msg));
+      return;
+    }
+  }
+  writeBlock("#<_probe_retract_z>=" + xyzFormat.format(retractHeight));
+  writeBlock("#<_probe_depth_z>=" + xyzFormat.format(depthHeight));
   writeBlock("#<_probe_lift>=" + ((extra && extra.lift) ? 1 : 0));
   // Fusion's "Print Results" checkbox. When set, each macro echoes the
   // measured centre, size and deviations to the console via PRINT, which
@@ -978,8 +1045,16 @@ function writeProbeParams(extra) {
     // A REAL point, with its real written Z. Projecting (nomX, nomY, 0) would
     // be wrong for the same reason the retract/depth pair was: at B90 l1 is
     // written -Z, so a zeroed Z throws the whole coordinate away.
+    //
+    // This projects on to the LATERAL u, not the tool axis, so the Z wanted
+    // here is the cycle point's own -- the feature centre's lateral
+    // coordinate once indexed. probePoint.z directly, not probedSurfaceZ():
+    // that returned the same number only because every scalar cycle height
+    // degenerates to probePoint.z at an index, and relying on that is a
+    // coincidence. Output is identical at every angle; at B0 the Z component
+    // is discarded by u anyway and nomX is what comes through.
     var nomPt = new Vector(extra.nomX || 0, extra.nomY || 0,
-      probedSurfaceZ(probePoint ? probePoint.z : 0));
+      probePoint ? probePoint.z : 0);
     if (extra.nomX !== undefined) {
       writeBlock("#<_probe_nom_l1>=" + xyzFormat.format(machineSpanOf(nomPt)));
     }
@@ -991,9 +1066,9 @@ function writeProbeParams(extra) {
     writeBlock("#<_probe_nom_z>=" + xyzFormat.format(extra.nomZ));
     // The same nominal as a TOOL-AXIS height, which is what a surface probe
     // actually measures. A Z nominal is only a height at B0; at B90 a plane
-    // of constant written Z is vertical. The point is projected whole, for
-    // the same reason the lateral nominals are.
-    var nomSurf = new Vector(probePoint ? probePoint.x : 0,
+    // of constant written Z is vertical. Must come from the real surface
+    // POINT -- building one around extra.nomZ put this 6 mm out at B90.
+    var nomSurf = probedSurfacePoint(probePoint ? probePoint.x : 0,
       probePoint ? probePoint.y : 0, extra.nomZ);
     writeBlock("#<_probe_nom_h>=" + xyzFormat.format(toolAxisHeight(nomSurf)));
   }
@@ -1065,6 +1140,24 @@ function machineSpanOf(p) {
 
 function probedSurfaceZ(z) {
   return (cycle.bottom !== undefined) ? cycle.bottom : z;
+}
+
+// The nominal probed surface as a REAL written-frame point.
+//
+// Synthesising one as (px, py, probedSurfaceZ(z)) only works at B0. At an
+// index every scalar cycle height collapses to probePoint.z -- the B90 dump
+// has bottom, clearance, retract and stock all reading 48.4836 -- so the
+// synthesised point carries the probe point's own height, not the surface's.
+// Projected on the tool axis it returns the retract height: 12 instead of 6,
+// a 6 mm error.
+//
+// cycle.bottomPosition is the real point and projects correctly at any angle.
+// At B0 it equals the synthesised one, so nothing changes there.
+function probedSurfacePoint(px, py, z) {
+  if (cycle.bottomPosition !== undefined) {
+    return cycle.bottomPosition;
+  }
+  return new Vector(px, py, probedSurfaceZ(z));
 }
 
 // Rapid is only safe ABOVE the retract height. Anything below it may be
@@ -1439,7 +1532,11 @@ function bLevelAfter(px, py, z) {
   // by _ProbeSurface before that return move and untouched afterwards.
   var ax = machineAxesInFrame();
   var ids = ["#<_ps_wx>", "#<_ps_wy>", "#<_ps_wz>"];
-  var surface = new Vector(px, py, probedSurfaceZ(z));
+  // The real surface point, not one synthesised around a scalar height: at an
+  // index the synthesised form collapses both points' _bl_nz on to the same
+  // retract height, which forces the NOMINAL slope to zero. Harmless when both
+  // points sit at one height, wrong the moment they do not.
+  var surface = probedSurfacePoint(px, py, z);
   writeComment("B level point " + n + " captured");
   writeBlock("#<_bl_x" + n + ">=" + probeDot(ax.u, ids));   // lateral
   writeBlock("#<_bl_y" + n + ">=#<_ps_wy>");                // machine Y, never rotated
